@@ -1,0 +1,16 @@
+{
+    "cutout_prob": 0.1713326018534782,
+    "cutout_size": 0.2749917811300007,
+    "flip_prob": 0.0,
+    "mixup_alpha": 0.11479912820533777,
+    "mixup_prob": 0.046300128446147615,
+    "noise_prob": 0.20883348888304443,
+    "noise_std": 0.06899845946908181,
+    "num_augmented_copies": 5,
+    "perspective_distortion": 0.11930502059146551,
+    "perspective_prob": 0.5498942421122388,
+    "rotate_deg": 9.489731028102511,
+    "rotate_prob": 0.9542745572206746,
+    "translate_frac": 0.11714013628702619,
+    "translate_prob": 0.6496977903383431
+}

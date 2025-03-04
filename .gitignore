@@ -1,0 +1,8 @@
+# Ignore the entire data folder
+/data/
+
+# Ignore all files with the .pth extension
+*.pth
+
+# Ignore any folder named saved_tensorsets in any directory
+**/saved_tensorsets/
