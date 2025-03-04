@@ -1,6 +1,7 @@
 import os
 import copy
 import json
+import pickle
 import random
 import time
 import math
@@ -27,6 +28,10 @@ DATA_LOADER_SEED   = 12345   # fixed seed for dataset shuffling
 EARLYSTOP_PATIENCE = 2       # not used in full-training evaluation
 
 THRESH_ZERO = 1e-12  # threshold below which LR is treated as 0
+
+# Checkpoint filenames
+CHECKPOINT_META_PATH = os.path.join(RESULTS_DIR, "bayes_opt_checkpoint_meta.json")
+CHECKPOINT_OPTIMIZER_PATH = os.path.join(RESULTS_DIR, "bayes_opt_checkpoint_optimizer.pkl")
 
 # ---------------------------
 # Global cache (not used in full training)
@@ -138,14 +143,12 @@ def evaluate_schedule_full(lr_schedule, wd_schedule, init_state_dict, train_load
     model = CNN(num_classes=num_classes).to(device)
     model.load_state_dict(init_state_dict)
     criterion = nn.CrossEntropyLoss()
-    # If weight_decay is provided, use it; otherwise, default to the first element in wd_schedule.
     if weight_decay is None:
         weight_decay = wd_schedule[0]
     optimizer = optim.AdamW(model.parameters(), lr=lr_schedule[0],
                             weight_decay=weight_decay, betas=(b1, b2))
     scaler = torch.cuda.amp.GradScaler()
 
-    # Train for all epochs (no early stopping)
     for e in range(1, num_epochs + 1):
         current_lr = lr_schedule[e - 1]
         current_wd = wd_schedule[e - 1]
@@ -162,7 +165,6 @@ def evaluate_schedule_full(lr_schedule, wd_schedule, init_state_dict, train_load
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
-    # Evaluate test accuracy after full training
     model.eval()
     tot_correct, tot_samples = 0, 0
     with torch.no_grad():
@@ -176,12 +178,47 @@ def evaluate_schedule_full(lr_schedule, wd_schedule, init_state_dict, train_load
     return acc, copy.deepcopy(model.state_dict())
 
 # ---------------------------
+# Checkpointing Utilities
+# ---------------------------
+def save_checkpoint(optimizer_obj, meta, checkpoint_meta_path, checkpoint_optimizer_path):
+    # Save optimizer state (using pickle)
+    with open(checkpoint_optimizer_path, "wb") as f:
+        pickle.dump(optimizer_obj, f)
+    # Save meta info (e.g., best params, completion token)
+    with open(checkpoint_meta_path, "w") as f:
+        json.dump(meta, f, indent=4)
+    tqdm.write("[checkpoint] Checkpoint saved.")
+
+def load_checkpoint(checkpoint_meta_path, checkpoint_optimizer_path):
+    if os.path.exists(checkpoint_meta_path) and os.path.exists(checkpoint_optimizer_path):
+        with open(checkpoint_meta_path, "r") as f:
+            meta = json.load(f)
+        with open(checkpoint_optimizer_path, "rb") as f:
+            optimizer_obj = pickle.load(f)
+        tqdm.write("[checkpoint] Checkpoint loaded.")
+        return meta, optimizer_obj
+    else:
+        return None, None
+
+# ---------------------------
 # Saving Experiment Results
 # ---------------------------
 def save_experiment_results(method_name, meta, best_state, init_state_dict):
-    init_path = os.path.join(RESULTS_DIR, f"problem1_{method_name}_init_state_dict.pth")
+    # Save initial state and best state with file iteration if completed token is set
+    base_init_path = os.path.join(RESULTS_DIR, f"problem1_{method_name}_init_state_dict")
+    base_best_path = os.path.join(RESULTS_DIR, f"problem1_{method_name}_best_state_dict")
+    # Check for completion token in meta; if not NULL, iterate filename
+    if meta.get("completed", "NULL") != "NULL":
+        count = 1
+        while os.path.exists(f"{base_init_path}_{count}.pth"):
+            count += 1
+        init_path = f"{base_init_path}_{count}.pth"
+        best_path = f"{base_best_path}_{count}.pth"
+    else:
+        init_path = base_init_path + ".pth"
+        best_path = base_best_path + ".pth"
+    
     torch.save(init_state_dict, init_path)
-    best_path = os.path.join(RESULTS_DIR, f"problem1_{method_name}_best_state_dict.pth")
     if best_state is not None:
         torch.save(best_state, best_path)
     meta["init_state_file"] = init_path
@@ -192,7 +229,7 @@ def save_experiment_results(method_name, meta, best_state, init_state_dict):
     tqdm.write(f"[{method_name.upper()}] Results saved to {json_path}.")
 
 # ---------------------------
-# Main Pipeline with Bayesian Optimization for LR Schedule and Optimizer Parameters
+# Main Pipeline with Bayesian Optimization and Checkpointing
 # ---------------------------
 def main():
     tqdm.write(f"[main] Setting up results folder: '{RESULTS_DIR}'")
@@ -208,17 +245,14 @@ def main():
     init_model = CNN(num_classes=num_classes)
     init_sd = copy.deepcopy(init_model.state_dict())
 
-    # Bayesian optimization will tune: lr_base, lr_peak, num_warmup_epochs, b1, b2, and weight_decay.
-    # We fix lr_end to 1e-6.
+    # Define objective function for Bayesian Optimization.
     def objective(lr_base, lr_peak, num_warmup_epochs, b1, b2, weight_decay):
         num_warmup_epochs = max(1, int(round(num_warmup_epochs)))
         lr_end = 1e-6
         lr_schedule = generate_lr_schedule(lr_base, lr_peak, lr_end, num_warmup_epochs, NUM_EPOCHS)
         wd_schedule = [weight_decay] * NUM_EPOCHS
-        # For fair evaluation, we run full training (no early stopping)
         acc, _ = evaluate_schedule_full(lr_schedule, wd_schedule, init_sd, train_loader, val_loader, test_loader,
                                         num_epochs=NUM_EPOCHS, device=DEVICE, b1=b1, b2=b2, weight_decay=weight_decay)
-        # Return accuracy (BayesianOptimization maximizes by default)
         return acc
 
     pbounds = {
@@ -230,24 +264,53 @@ def main():
         "weight_decay": (1e-6, 1e-3)
     }
 
-    optimizer = BayesianOptimization(
-        f=objective,
-        pbounds=pbounds,
-        random_state=42,
-    )
+    # Try to load an existing checkpoint
+        # Try to load an existing checkpoint
+    meta, optimizer_obj = load_checkpoint(CHECKPOINT_META_PATH, CHECKPOINT_OPTIMIZER_PATH)
+    if optimizer_obj is None:
+        tqdm.write("[bayes_opt] No checkpoint found. Starting fresh Bayesian Optimization.")
+        optimizer_obj = BayesianOptimization(
+            f=objective,
+            pbounds=pbounds,
+            random_state=42,
+        )
+        meta = {"completed": "NULL", "best_params": None}
+        # Generate initial points (if needed)
+        optimizer_obj.maximize(init_points=5, n_iter=0)
+    else:
+        tqdm.write("[bayes_opt] Resuming from checkpoint.")
 
-    tqdm.write("[bayes_opt] Starting Bayesian Optimization over LR schedule and optimizer parameters...")
-    optimizer.maximize(
-        init_points=5,
-        n_iter=200,
-    )
+    # Run optimization in small chunks with periodic checkpointing.
+    total_iter = 200  # total iterations to run after the initial points
+    checkpoint_interval = 10  # checkpoint every 10 iterations
 
-    best_params = optimizer.max["params"]
+    try:
+        for i in range(0, total_iter, checkpoint_interval):
+            iter_this_block = min(checkpoint_interval, total_iter - i)
+            tqdm.write(f"[bayes_opt] Running iterations {i+1} to {i+iter_this_block}...")
+            optimizer_obj.maximize(n_iter=iter_this_block)
+            
+            # Save checkpoint after these iterations
+            meta["best_params"] = optimizer_obj.max.get("params", None)
+            meta["completed"] = "NULL"
+            save_checkpoint(optimizer_obj, meta, CHECKPOINT_META_PATH, CHECKPOINT_OPTIMIZER_PATH)
+    except Exception as e:
+        tqdm.write(f"[error] Optimization interrupted: {e}")
+        meta["best_params"] = optimizer_obj.max.get("params", None)
+        meta["completed"] = "NULL"
+        save_checkpoint(optimizer_obj, meta, CHECKPOINT_META_PATH, CHECKPOINT_OPTIMIZER_PATH)
+        raise e
+
+    # Mark as completed and continue with final evaluation.
+    meta["completed"] = "FULL"
+    meta["best_params"] = optimizer_obj.max["params"]
+    best_params = optimizer_obj.max["params"]
     best_params["num_warmup_epochs"] = int(round(best_params["num_warmup_epochs"]))
-    best_acc = optimizer.max["target"]
+    best_acc = optimizer_obj.max["target"]
     tqdm.write(f"[bayes_opt] Best parameters found: {best_params} with test accuracy: {best_acc:.4f}")
 
-    # Re-run final evaluation with best parameters and save the results.
+
+    # Final evaluation with best parameters.
     lr_end = 1e-6
     best_lr_schedule = generate_lr_schedule(best_params["lr_base"], best_params["lr_peak"], lr_end,
                                              best_params["num_warmup_epochs"], NUM_EPOCHS)
@@ -258,15 +321,17 @@ def main():
                                                     num_epochs=NUM_EPOCHS, device=DEVICE,
                                                     b1=best_params["b1"], b2=best_params["b2"],
                                                     weight_decay=best_params["weight_decay"])
-    meta = {
-        "final_acc": final_acc,
-        "best_params": best_params,
-        "lr_schedule": best_lr_schedule,
-        "wd_schedule": best_wd_schedule
-    }
+    meta["final_acc"] = final_acc
+    meta["lr_schedule"] = best_lr_schedule
+    meta["wd_schedule"] = best_wd_schedule
+
     save_experiment_results("bayes_opt", meta, final_state, init_sd)
+    # Optionally remove checkpoint files since we completed a full run:
+    os.remove(CHECKPOINT_META_PATH)
+    os.remove(CHECKPOINT_OPTIMIZER_PATH)
     tqdm.write(f"[main] Final test accuracy with best parameters: {final_acc:.4f}")
     tqdm.write("[main] All done.")
 
 if __name__ == "__main__":
     main()
+        
