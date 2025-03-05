@@ -25,7 +25,7 @@ RESULTS_DIR        = "./kmnist/results_bayes_opt"
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
 DATA_LOADER_SEED   = 12345   # fixed seed for dataset shuffling
-EARLYSTOP_PATIENCE = 2       # early stopping patience
+EARLYSTOP_PATIENCE = 2       # early stopping patience (number of epochs with no improvement over previous epoch)
 THRESH_ZERO        = 1e-12    # threshold below which LR is treated as 0
 
 # Global model identifier.
@@ -136,7 +136,7 @@ def generate_lr_schedule(lr_base, lr_peak, lr_end, num_warmup_epochs, total_epoc
     return schedule
 
 # ---------------------------
-# Evaluation Function (Full Training) with Early Stopping
+# Evaluation Function (Full Training) with More Forgiving Early Stopping
 # ---------------------------
 def evaluate_schedule_full(lr_schedule, wd_schedule, init_state_dict, train_loader, val_loader, test_loader,
                            num_epochs=NUM_EPOCHS, device=DEVICE, b1=0.85, b2=0.999, weight_decay=None,
@@ -154,6 +154,7 @@ def evaluate_schedule_full(lr_schedule, wd_schedule, init_state_dict, train_load
     best_val_loss = float('inf')
     best_state = None
     epochs_no_improve = 0
+    prev_val_loss = None
 
     for e in range(1, num_epochs + 1):
         current_lr = lr_schedule[e - 1]
@@ -175,12 +176,19 @@ def evaluate_schedule_full(lr_schedule, wd_schedule, init_state_dict, train_load
 
         val_loss = compute_loss(model, val_loader, criterion, device)
         tqdm.write(f"[early_stop] Epoch {e}: validation loss = {val_loss:.4f}")
-        if val_loss < best_val_loss - 1e-6:
-            best_val_loss = val_loss
-            best_state = copy.deepcopy(model.state_dict())
+
+        # Forgiving early stopping:
+        # If this is the first epoch or if loss dropped compared to previous epoch, reset patience.
+        if prev_val_loss is None or val_loss < prev_val_loss - 1e-6:
             epochs_no_improve = 0
         else:
             epochs_no_improve += 1
+        prev_val_loss = val_loss
+
+        # Always update best_val_loss and best_state when a new minimum is found.
+        if val_loss < best_val_loss - 1e-6:
+            best_val_loss = val_loss
+            best_state = copy.deepcopy(model.state_dict())
 
         if epochs_no_improve >= early_stop_patience:
             tqdm.write(f"[early_stop] Early stopping triggered at epoch {e}.")
@@ -212,7 +220,10 @@ INIT_SD = None
 # ---------------------------
 # Objective Function (Defined at module level for pickling)
 # ---------------------------
-def objective(lr_base, lr_peak, lr_end, num_warmup_epochs, b1, b2, weight_decay):
+def objective(lr_peak, base_frac, end_frac, num_warmup_epochs, b1, b2, weight_decay):
+    # Convert fractions into actual lr values:
+    lr_base = base_frac * lr_peak
+    lr_end = end_frac * lr_peak
     num_warmup_epochs = max(1, int(round(num_warmup_epochs)))
     lr_schedule = generate_lr_schedule(lr_base, lr_peak, lr_end, num_warmup_epochs, NUM_EPOCHS)
     wd_schedule = [weight_decay] * NUM_EPOCHS
@@ -290,12 +301,13 @@ def main():
     init_model = CNN(num_classes=num_classes)
     INIT_SD = copy.deepcopy(init_model.state_dict())
 
+    # Note: We now optimize "lr_peak", "base_frac", and "end_frac" instead of separate lr_base and lr_end.
     pbounds = {
-        "lr_base": (1e-6, 1e-2),
-        "lr_peak": (5e-4, 1e-2),
-        "lr_end": (1e-7, 1e-2),
-        "num_warmup_epochs": (1, 6),
-        "b1": (0.5, 0.95),
+        "lr_peak": (1e-3, 1e-2),
+        "base_frac": (0.1, 0.9),
+        "end_frac": (0.0, 0.5),
+        "num_warmup_epochs": (1, 5),
+        "b1": (0.80, 0.95),
         "b2": (0.99, 0.9999),
         "weight_decay": (1e-6, 1e-3)
     }
@@ -309,7 +321,7 @@ def main():
             random_state=42,
         )
         meta = {"model_name": MODEL_NAME, "completed": "NULL", "best_params": None}
-        optimizer_obj.maximize(init_points=10, n_iter=0)
+        optimizer_obj.maximize(init_points=100, n_iter=0)
     else:
         tqdm.write("[bayes_opt] Resuming from checkpoint.")
 
@@ -338,8 +350,13 @@ def main():
     best_acc = optimizer_obj.max["target"]
     tqdm.write(f"[bayes_opt] Best parameters found: {best_params} with test accuracy: {best_acc:.4f}")
 
-    best_lr_schedule = generate_lr_schedule(best_params["lr_base"], best_params["lr_peak"],
-                                             best_params["lr_end"], best_params["num_warmup_epochs"], NUM_EPOCHS)
+    best_lr_schedule = generate_lr_schedule(
+        best_params["base_frac"] * best_params["lr_peak"],
+        best_params["lr_peak"],
+        best_params["end_frac"] * best_params["lr_peak"],
+        best_params["num_warmup_epochs"],
+        NUM_EPOCHS
+    )
     best_wd_schedule = [best_params["weight_decay"]] * NUM_EPOCHS
 
     final_acc, final_state = evaluate_schedule_full(best_lr_schedule, best_wd_schedule, INIT_SD,
