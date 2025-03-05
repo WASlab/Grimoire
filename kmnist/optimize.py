@@ -14,14 +14,16 @@ from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 from bayes_opt import BayesianOptimization  # pip install bayesian-optimization
 from sklearn.metrics import f1_score, precision_score, recall_score, accuracy_score
+from model import CNN, EfficientCNN
 
-plt.style.use('seaborn-v0_8-darkgrid')
+# You requested to see the cosine warmup + cosine decay schedule implemented.
+# We also removed the need for an explicit warmup step count (num_warmup_epochs)
+# and removed b1/b2 as tunable parameters altogether.
 
 # ---------------------------
 # Global Verbosity (1 = minimal, 2 = maximum)
 # ---------------------------
 VERBOSE = 1
-
 def vprint(msg, level=1):
     if VERBOSE >= level:
         tqdm.write(msg)
@@ -30,7 +32,7 @@ def vprint(msg, level=1):
 # Global Objective Metric
 # ---------------------------
 # Acceptable values: "accuracy", "macro_f1", "micro_f1", "weighted_f1", "precision", "recall"
-OBJECTIVE_METRIC = "macro_f1"
+OBJECTIVE_METRIC = "accuracy"
 
 # =============== Hyperparameters ===============
 NUM_EPOCHS         = 10
@@ -40,24 +42,20 @@ SAVED_TENSORSETS_DIR = "./saved_tensorsets"
 RESULTS_DIR        = "./kmnist/results_bayes_opt"
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
-DATA_LOADER_SEED   = 12345   # fixed seed for dataset shuffling
-EARLYSTOP_PATIENCE = float('nan')  # set to finite value to enable early stopping, or NaN to disable
-THRESH_ZERO        = 1e-12    # threshold below which LR is treated as 0
+# FIXED seed for data loading and model initialization.
+DATA_LOADER_SEED   = 42
 
-# Global model identifier.
-MODEL_NAME = "CNN_v1"  # Change this if you use a different architecture
+EARLYSTOP_PATIENCE = float('nan')  # Set to finite value (e.g. 2) to enable early stopping, or NaN to disable
+THRESH_ZERO        = 1e-12
 
-# Checkpoint filenames incorporate the model name.
+MODEL_NAME = "EfficientCNN_v1"  # Global model identifier
+
 CHECKPOINT_META_PATH = os.path.join(RESULTS_DIR, f"bayes_opt_checkpoint_meta_{MODEL_NAME}.json")
 CHECKPOINT_OPTIMIZER_PATH = os.path.join(RESULTS_DIR, f"bayes_opt_checkpoint_optimizer_{MODEL_NAME}.pkl")
 
-# ---------------------------
-# Global cache (not used in full training)
-# ---------------------------
 BEST_PREFIX_CACHE = {}
 GLOBAL_EVAL_COUNT = 0
 
-# Custom tqdm kwargs for inline, dynamic updating
 tqdm_kwargs = dict(
     leave=False,
     dynamic_ncols=True,
@@ -69,6 +67,7 @@ tqdm_kwargs = dict(
 # ---------------------------
 def load_tensor_datasets(save_dir=SAVED_TENSORSETS_DIR):
     vprint(f"[load_tensor_datasets] Loading KMNIST TensorDatasets from '{save_dir}'...", level=2)
+    # Adjust these paths to the actual files for your environment
     train_tds = torch.load("./kmnist/results_augmentation_search/kmnist_train_augmented_tensorset.pth")
     val_tds = torch.load("./kmnist/saved_tensorsets/kmnist_val_tensorset.pth")
     test_tds = torch.load("./kmnist/saved_tensorsets/kmnist_test_tensorset.pth")
@@ -80,8 +79,8 @@ def get_dataloaders(train_tds, val_tds, test_tds, batch_size=32, shuffle_seed=DA
     g = torch.Generator()
     g.manual_seed(shuffle_seed)
     train_loader = DataLoader(train_tds, batch_size=batch_size, shuffle=True, generator=g)
-    val_loader   = DataLoader(val_tds, batch_size=batch_size, shuffle=False)
-    test_loader  = DataLoader(test_tds, batch_size=batch_size, shuffle=False)
+    val_loader = DataLoader(val_tds, batch_size=batch_size, shuffle=False)
+    test_loader = DataLoader(test_tds, batch_size=batch_size, shuffle=False)
     return train_loader, val_loader, test_loader
 
 def compute_loss(model, loader, criterion, device=DEVICE):
@@ -97,55 +96,30 @@ def compute_loss(model, loader, criterion, device=DEVICE):
     return total_loss / total_samples if total_samples > 0 else float('inf')
 
 # ---------------------------
-# CNN Architecture
+# Cosine Warmup + Cosine Decay Schedule
 # ---------------------------
-class CNN(nn.Module):
-    def __init__(self, num_classes=10):
-        super(CNN, self).__init__()
-        self.conv1 = nn.Conv2d(1, 32, kernel_size=3, padding=1)
-        self.bn1   = nn.BatchNorm2d(32)
-        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
-        self.bn2   = nn.BatchNorm2d(64)
-        self.pool  = nn.MaxPool2d(2, 2)
-        self.fc1   = nn.Linear(64 * 7 * 7, 1024)
-        self.bn3   = nn.BatchNorm1d(1024)
-        self.dropout = nn.Dropout(0.0)
-        self.fc2   = nn.Linear(1024, 512)
-        self.bn4   = nn.BatchNorm1d(512)
-        self.fc3   = nn.Linear(512, 256)
-        self.bn5   = nn.BatchNorm1d(256)
-        self.fc4   = nn.Linear(256, 128)
-        self.bn6   = nn.BatchNorm1d(128)
-        self.fc5   = nn.Linear(128, num_classes)
-    
-    def forward(self, x):
-        x = F.gelu(self.bn1(self.conv1(x)))
-        x = self.pool(x)
-        x = F.gelu(self.bn2(self.conv2(x)))
-        x = self.pool(x)
-        x = x.view(x.size(0), -1)
-        x = F.gelu(self.bn3(self.fc1(x)))
-        x = self.dropout(x)
-        x = F.gelu(self.bn4(self.fc2(x)))
-        x = self.dropout(x)
-        x = F.gelu(self.bn5(self.fc3(x)))
-        x = self.dropout(x)
-        x = F.gelu(self.bn6(self.fc4(x)))
-        x = self.dropout(x)
-        x = self.fc5(x)
-        return x
-
-# ---------------------------
-# Fixed LR Schedule: Linear Warmup + Cosine Annealing
-# ---------------------------
-def generate_lr_schedule(lr_base, lr_peak, lr_end, num_warmup_epochs, total_epochs):
+def generate_cosine_warmup_decay_schedule(lr_base, lr_peak, lr_end, total_epochs):
+    """
+    Piecewise schedule that:
+      - In the first half of the epochs, does a half-cosine from lr_base to lr_peak (warmup).
+      - In the second half, does a half-cosine from lr_peak down to lr_end (decay).
+    This removes the need for an explicit 'num_warmup_epochs' param.
+    """
     schedule = []
     for epoch in range(total_epochs):
-        if epoch < num_warmup_epochs:
-            lr = lr_base + (lr_peak - lr_base) * (epoch + 1) / num_warmup_epochs
+        p = epoch / max(1, (total_epochs - 1))  # fraction of progress [0..1]
+        if p <= 0.5:
+            # Warmup: from lr_base up to lr_peak
+            # Map p in [0..0.5] to p2 in [0..1]
+            p2 = p / 0.5
+            # Half-cosine from lr_base to lr_peak
+            lr = lr_base + 0.5 * (lr_peak - lr_base) * (1 - math.cos(math.pi * p2))
         else:
-            cosine_decay = 0.5 * (1 + math.cos(math.pi * (epoch - num_warmup_epochs) / (total_epochs - num_warmup_epochs)))
-            lr = lr_end + (lr_peak - lr_end) * cosine_decay
+            # Decay: from lr_peak down to lr_end
+            # Map p in [0.5..1] to p2 in [0..1]
+            p2 = (p - 0.5) / 0.5
+            # Half-cosine from lr_peak down to lr_end
+            lr = lr_peak + 0.5 * (lr_end - lr_peak) * (1 - math.cos(math.pi * p2))
         schedule.append(lr)
     return schedule
 
@@ -153,16 +127,19 @@ def generate_lr_schedule(lr_base, lr_peak, lr_end, num_warmup_epochs, total_epoc
 # Evaluation Function (Full Training) with Toggleable Early Stopping
 # ---------------------------
 def evaluate_schedule_full(lr_schedule, wd_schedule, init_state_dict, train_loader, val_loader, test_loader,
-                           num_epochs=NUM_EPOCHS, device=DEVICE, b1=0.85, b2=0.999, weight_decay=None,
+                           num_epochs=NUM_EPOCHS, device=DEVICE, weight_decay=None,
                            early_stop_patience=EARLYSTOP_PATIENCE):
-    num_classes = int(train_loader.dataset.tensors[1].max().item() + 1)
-    model = CNN(num_classes=num_classes).to(device)
+    num_classes = int(train_loader.dataset.tensors[1].max().item()+1)
+    model = EfficientCNN(num_classes=num_classes).to(device)
     model.load_state_dict(init_state_dict)
     criterion = nn.CrossEntropyLoss()
+
+    # We'll use AdamW with fixed betas
+    # (b1 and b2 are removed from tuning and remain as defaults)
     if weight_decay is None:
         weight_decay = wd_schedule[0]
-    optimizer = optim.AdamW(model.parameters(), lr=lr_schedule[0],
-                            weight_decay=weight_decay, betas=(b1, b2))
+    optimizer = optim.AdamW(model.parameters(), lr=lr_schedule[0], weight_decay=weight_decay,betas=(.80, .999))
+
     scaler = torch.cuda.amp.GradScaler()
 
     best_val_loss = float('inf')
@@ -170,9 +147,9 @@ def evaluate_schedule_full(lr_schedule, wd_schedule, init_state_dict, train_load
     epochs_no_improve = 0
     prev_val_loss = None
 
-    for e in range(1, num_epochs + 1):
-        current_lr = lr_schedule[e - 1]
-        current_wd = wd_schedule[e - 1]
+    for e in range(1, num_epochs+1):
+        current_lr = lr_schedule[e-1]
+        current_wd = wd_schedule[e-1]
         for pg in optimizer.param_groups:
             pg['lr'] = current_lr
             pg['weight_decay'] = current_wd
@@ -191,6 +168,7 @@ def evaluate_schedule_full(lr_schedule, wd_schedule, init_state_dict, train_load
         val_loss = compute_loss(model, val_loader, criterion, device)
         vprint(f"[early_stop] Epoch {e}: validation loss = {val_loss:.4f}", level=2)
 
+        # Early Stopping logic
         if not math.isnan(early_stop_patience):
             if prev_val_loss is None or val_loss < prev_val_loss - 1e-6:
                 epochs_no_improve = 0
@@ -212,6 +190,8 @@ def evaluate_schedule_full(lr_schedule, wd_schedule, init_state_dict, train_load
 
     if best_state is not None:
         model.load_state_dict(best_state)
+
+    # Evaluate on the test set
     model.eval()
     tot_correct, tot_samples = 0, 0
     all_preds, all_labels = [], []
@@ -224,9 +204,8 @@ def evaluate_schedule_full(lr_schedule, wd_schedule, init_state_dict, train_load
             tot_samples += images.size(0)
             all_preds.extend(preds.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
-    acc = tot_correct / tot_samples
 
-    # Compute additional metrics if required.
+    acc = tot_correct / tot_samples
     metrics = {"accuracy": acc}
     if OBJECTIVE_METRIC in {"macro_f1", "micro_f1", "weighted_f1", "precision", "recall"}:
         metrics["macro_f1"] = f1_score(all_labels, all_preds, average="macro")
@@ -247,16 +226,32 @@ INIT_SD = None
 # ---------------------------
 # Objective Function (for pickling)
 # ---------------------------
-def objective(lr_peak, base_frac, end_frac, num_warmup_epochs, b1, b2, weight_decay):
+def objective(lr_peak, base_frac, end_frac, weight_decay):
+    """
+    Now uses a piecewise cosine warmup + cosine decay schedule from:
+      lr_base = base_frac * lr_peak
+      lr_end  = end_frac * lr_peak
+    We removed num_warmup_epochs and b1/b2 from the search.
+    """
     lr_base = base_frac * lr_peak
     lr_end = end_frac * lr_peak
-    num_warmup_epochs = max(1, int(round(num_warmup_epochs)))
-    lr_schedule = generate_lr_schedule(lr_base, lr_peak, lr_end, num_warmup_epochs, NUM_EPOCHS)
-    wd_schedule = [weight_decay] * NUM_EPOCHS
-    metrics, _ = evaluate_schedule_full(lr_schedule, wd_schedule, INIT_SD, TRAIN_LOADER, VAL_LOADER, TEST_LOADER,
-                                        num_epochs=NUM_EPOCHS, device=DEVICE, b1=b1, b2=b2,
-                                        weight_decay=weight_decay, early_stop_patience=EARLYSTOP_PATIENCE)
-    # Return the metric specified by OBJECTIVE_METRIC
+
+    # Generate the schedule
+    lr_schedule = generate_cosine_warmup_decay_schedule(lr_base, lr_peak, lr_end, NUM_EPOCHS)
+    wd_schedule = [weight_decay]*NUM_EPOCHS
+
+    metrics, _ = evaluate_schedule_full(
+        lr_schedule=lr_schedule,
+        wd_schedule=wd_schedule,
+        init_state_dict=INIT_SD,
+        train_loader=TRAIN_LOADER,
+        val_loader=VAL_LOADER,
+        test_loader=TEST_LOADER,
+        num_epochs=NUM_EPOCHS,
+        device=DEVICE,
+        weight_decay=weight_decay,
+        early_stop_patience=EARLYSTOP_PATIENCE
+    )
     return metrics.get(OBJECTIVE_METRIC, metrics["accuracy"])
 
 # ---------------------------
@@ -336,30 +331,36 @@ def print_misclassification_report(model, test_loader, device=DEVICE):
 def main():
     vprint(f"[main] Setting up results folder: '{RESULTS_DIR}'", level=1)
     os.makedirs(RESULTS_DIR, exist_ok=True)
+
     global GLOBAL_EVAL_COUNT, TRAIN_LOADER, VAL_LOADER, TEST_LOADER, INIT_SD
     GLOBAL_EVAL_COUNT = 0
 
+    # Fix seed for the entire optimization run
+    torch.manual_seed(42)
+    random.seed(42)
+
     checkpoint_meta = {"model_name": MODEL_NAME, "completed": "NULL", "best_params": None}
 
-    vprint("[main] Loading dataset + building initial CNN model.", level=1)
+    vprint("[main] Loading dataset + building initial EfficientCNN model.", level=1)
     train_tds, val_tds, test_tds = load_tensor_datasets(SAVED_TENSORSETS_DIR)
     TRAIN_LOADER, VAL_LOADER, TEST_LOADER = get_dataloaders(train_tds, val_tds, test_tds, BATCH_SIZE)
     num_classes = int(TRAIN_LOADER.dataset.tensors[1].max().item() + 1)
+
+    # Fix model initialization seed
     torch.manual_seed(42)
-    init_model = CNN(num_classes=num_classes)
+    random.seed(42)
+    init_model = EfficientCNN(num_classes=num_classes)
     INIT_SD = copy.deepcopy(init_model.state_dict())
 
-    # Optimize "lr_peak", "base_frac", and "end_frac"
+    # Define the parameter bounds (no num_warmup_epochs, no b1/b2)
     pbounds = {
         "lr_peak": (1e-3, 1e-2),
         "base_frac": (0.1, 0.9),
-        "end_frac": (0.0, 0.5),
-        "num_warmup_epochs": (1, 5),
-        "b1": (0.80, 0.95),
-        "b2": (0.99, 0.9999),
+        "end_frac": (0.0, 0.7),
         "weight_decay": (1e-6, 1e-3)
     }
 
+    # Attempt to load from checkpoint
     meta, optimizer_obj = load_checkpoint(CHECKPOINT_META_PATH, CHECKPOINT_OPTIMIZER_PATH)
     if optimizer_obj is None:
         vprint("[bayes_opt] No checkpoint found. Starting fresh Bayesian Optimization.", level=1)
@@ -369,11 +370,11 @@ def main():
             random_state=42,
         )
         meta = {"model_name": MODEL_NAME, "completed": "NULL", "best_params": None}
-        optimizer_obj.maximize(init_points=100, n_iter=0)
+        optimizer_obj.maximize(init_points=15, n_iter=0)
     else:
         vprint("[bayes_opt] Resuming from checkpoint.", level=1)
 
-    total_iter = 200  # iterations after initial points
+    total_iter = 100  # Number of subsequent BO iterations
     checkpoint_interval = 10  # checkpoint every 10 iterations
 
     try:
@@ -391,28 +392,34 @@ def main():
         save_checkpoint(optimizer_obj, meta, CHECKPOINT_META_PATH, CHECKPOINT_OPTIMIZER_PATH)
         raise e
 
+    # Finished all iterations
     meta["completed"] = "FULL"
     meta["best_params"] = optimizer_obj.max["params"]
     best_params = optimizer_obj.max["params"]
-    best_params["num_warmup_epochs"] = int(round(best_params["num_warmup_epochs"]))
     best_acc = optimizer_obj.max["target"]
     vprint(f"[bayes_opt] Best parameters found: {best_params} with test metric: {best_acc:.4f}", level=1)
 
-    best_lr_schedule = generate_lr_schedule(
-        best_params["base_frac"] * best_params["lr_peak"],
-        best_params["lr_peak"],
-        best_params["end_frac"] * best_params["lr_peak"],
-        best_params["num_warmup_epochs"],
-        NUM_EPOCHS
-    )
-    best_wd_schedule = [best_params["weight_decay"]] * NUM_EPOCHS
+    # Reconstruct schedule for final evaluation
+    lr_peak = best_params["lr_peak"]
+    lr_base = best_params["base_frac"] * lr_peak
+    lr_end = best_params["end_frac"] * lr_peak
+    best_wd = best_params["weight_decay"]
 
-    final_metrics, final_state = evaluate_schedule_full(best_lr_schedule, best_wd_schedule, INIT_SD,
-                                                         TRAIN_LOADER, VAL_LOADER, TEST_LOADER,
-                                                         num_epochs=NUM_EPOCHS, device=DEVICE,
-                                                         b1=best_params["b1"], b2=best_params["b2"],
-                                                         weight_decay=best_params["weight_decay"],
-                                                         early_stop_patience=EARLYSTOP_PATIENCE)
+    best_lr_schedule = generate_cosine_warmup_decay_schedule(lr_base, lr_peak, lr_end, NUM_EPOCHS)
+    best_wd_schedule = [best_wd] * NUM_EPOCHS
+
+    final_metrics, final_state = evaluate_schedule_full(
+        lr_schedule=best_lr_schedule,
+        wd_schedule=best_wd_schedule,
+        init_state_dict=INIT_SD,
+        train_loader=TRAIN_LOADER,
+        val_loader=VAL_LOADER,
+        test_loader=TEST_LOADER,
+        num_epochs=NUM_EPOCHS,
+        device=DEVICE,
+        weight_decay=best_wd,
+        early_stop_patience=EARLYSTOP_PATIENCE
+    )
     final_acc = final_metrics.get("accuracy", final_metrics["accuracy"])
     meta["final_acc"] = final_acc
     meta["lr_schedule"] = best_lr_schedule
@@ -420,18 +427,15 @@ def main():
 
     save_experiment_results("bayes_opt", meta, final_state, INIT_SD)
 
-    # After final evaluation, print misclassification report:
-    # Reload the best model and generate report.
-    best_model = CNN(num_classes=num_classes).to(DEVICE)
-    best_model.load_state_dict(final_state)
-    print_misclassification_report(best_model, TEST_LOADER, device=DEVICE)
-
+    # Remove checkpoint files once we've finalized
     if os.path.exists(CHECKPOINT_META_PATH):
         os.remove(CHECKPOINT_META_PATH)
     if os.path.exists(CHECKPOINT_OPTIMIZER_PATH):
         os.remove(CHECKPOINT_OPTIMIZER_PATH)
+
     vprint(f"[main] Final test accuracy with best parameters: {final_acc:.4f}", level=1)
     vprint("[main] All done.", level=1)
+
 
 if __name__ == "__main__":
     main()

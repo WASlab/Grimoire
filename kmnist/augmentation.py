@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader, TensorDataset, ConcatDataset
 from torchvision import transforms as T
 from tqdm import tqdm
 from bayes_opt import BayesianOptimization  # pip install bayesian-optimization
-
+from model import CNN, EfficientCNN, SwiGLUEfficientCNN
 plt.style.use('seaborn-v0_8-darkgrid')
 
 # =============== Global Settings & Hyperparameters ===============
@@ -23,7 +23,7 @@ FINAL_TRAIN_EPOCHS    = 5           # final training epochs for evaluation on te
 BATCH_SIZE            = 1028
 DEVICE                = "cuda" if torch.cuda.is_available() else "cpu"
 SAVED_TENSORSETS_DIR  = "./kmnist/saved_tensorsets"
-RESULTS_DIR           = "./kmnist/results_augmentation_search"
+RESULTS_DIR           = "./kmnist/results_augmentation_search2"
 os.makedirs(RESULTS_DIR, exist_ok=True)
 DATA_LOADER_SEED      = 12345      # fixed seed for reproducibility
 
@@ -111,41 +111,7 @@ def get_dataloaders(train_tds, val_tds, test_tds, batch_size=BATCH_SIZE, shuffle
 # ---------------------------
 # CNN Architecture (Proxy model)
 # ---------------------------
-class CNN(nn.Module):
-    def __init__(self, num_classes=10):
-        super(CNN, self).__init__()
-        self.conv1 = nn.Conv2d(1, 32, kernel_size=3, padding=1)
-        self.bn1   = nn.BatchNorm2d(32)
-        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
-        self.bn2   = nn.BatchNorm2d(64)
-        self.pool  = nn.MaxPool2d(2, 2)
-        self.fc1   = nn.Linear(64 * 7 * 7, 1024)
-        self.bn3   = nn.BatchNorm1d(1024)
-        self.dropout = nn.Dropout(0.2)
-        self.fc2   = nn.Linear(1024, 512)
-        self.bn4   = nn.BatchNorm1d(512)
-        self.fc3   = nn.Linear(512, 256)
-        self.bn5   = nn.BatchNorm1d(256)
-        self.fc4   = nn.Linear(256, 128)
-        self.bn6   = nn.BatchNorm1d(128)
-        self.fc5   = nn.Linear(128, num_classes)
-    
-    def forward(self, x):
-        x = F.gelu(self.bn1(self.conv1(x)))
-        x = self.pool(x)
-        x = F.gelu(self.bn2(self.conv2(x)))
-        x = self.pool(x)
-        x = x.view(x.size(0), -1)
-        x = F.gelu(self.bn3(self.fc1(x)))
-        x = self.dropout(x)
-        x = F.gelu(self.bn4(self.fc2(x)))
-        x = self.dropout(x)
-        x = F.gelu(self.bn5(self.fc3(x)))
-        x = self.dropout(x)
-        x = F.gelu(self.bn6(self.fc4(x)))
-        x = self.dropout(x)
-        x = self.fc5(x)
-        return x
+
 
 # ---------------------------
 # Augmentation Pipeline Builder (GPU-accelerated)
@@ -227,7 +193,7 @@ def evaluate_augmentation_policy(policy_params, init_state, train_tds, val_tds, 
     train_loader, val_loader, test_loader = get_dataloaders(augmented_train_tds, val_tds, test_tds, batch_size)
     
     num_classes = int(train_tds.tensors[1].max().item() + 1)
-    model = CNN(num_classes=num_classes).to(DEVICE)
+    model = SwiGLUEfficientCNN(num_classes=num_classes).to(DEVICE)
     model.load_state_dict(init_state)
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.AdamW(model.parameters(), lr=1e-3)
@@ -286,7 +252,7 @@ if __name__ == "__main__":
     train_tds, val_tds, test_tds = load_tensor_datasets(SAVED_TENSORSETS_DIR)
     num_classes = int(train_tds.tensors[1].max().item() + 1)
     torch.manual_seed(42)
-    init_model = CNN(num_classes=num_classes)
+    init_model = SwiGLUEfficientCNN(num_classes=num_classes)
     initial_state = copy.deepcopy(init_model.state_dict())
     
     # Define search space (for grayscale images, skipping color jitter)
@@ -301,10 +267,10 @@ if __name__ == "__main__":
         "perspective_prob": (0.0, 1.0),
         "perspective_distortion": (0, 0.3),
         "num_augmented_copies": (1, 5),
-        "mixup_prob": (0.0, 1.0),
-        "mixup_alpha": (0.1, 1.0),
-        "cutout_prob": (0.0, 1.0),
-        "cutout_size": (0.0, 0.5)
+        "mixup_prob": (0.0, 0.0),
+        "mixup_alpha": (0.0, 0.0),
+        "cutout_prob": (0.0, 0.0),
+        "cutout_size": (0.0, 0.0)
     }
     
     optimizer = BayesianOptimization(
@@ -353,7 +319,7 @@ if __name__ == "__main__":
     final_train_loader, _, test_loader = get_dataloaders(final_augmented_train_tds, val_tds, test_tds, batch_size=BATCH_SIZE)
     
     # Initialize final model with same initial state.
-    final_model = CNN(num_classes=num_classes).to(DEVICE)
+    final_model = SwiGLUEfficientCNN(num_classes=num_classes).to(DEVICE)
     final_model.load_state_dict(initial_state)
     criterion = nn.CrossEntropyLoss()
     optimizer_final = optim.AdamW(final_model.parameters(), lr=1e-3)
