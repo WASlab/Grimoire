@@ -68,7 +68,7 @@ tqdm_kwargs = dict(
 def load_tensor_datasets(save_dir=SAVED_TENSORSETS_DIR):
     vprint(f"[load_tensor_datasets] Loading KMNIST TensorDatasets from '{save_dir}'...", level=2)
     # Adjust these paths to the actual files for your environment
-    train_tds = torch.load("./kmnist/results_augmentation_search/kmnist_train_augmented_tensorset.pth")
+    train_tds = torch.load("./kmnist/results_augmentation_search2/kmnist_train_augmented_tensorset.pth")
     val_tds = torch.load("./kmnist/saved_tensorsets/kmnist_val_tensorset.pth")
     test_tds = torch.load("./kmnist/saved_tensorsets/kmnist_test_tensorset.pth")
     vprint(f"[load_tensor_datasets] Done. (Train={len(train_tds)}, Val={len(val_tds)}, Test={len(test_tds)})", level=2)
@@ -355,8 +355,8 @@ def main():
     # Define the parameter bounds (no num_warmup_epochs, no b1/b2)
     pbounds = {
         "lr_peak": (1e-3, 1e-2),
-        "base_frac": (0.1, 0.9),
-        "end_frac": (0.0, 0.7),
+        "base_frac": (0.5, 0.9),
+        "end_frac": (0.0, 0.5),
         "weight_decay": (1e-6, 1e-3)
     }
 

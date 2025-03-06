@@ -1,0 +1,10 @@
+{
+    "model_name": "CNN_v1",
+    "completed": "NULL",
+    "best_params": {
+        "base_frac": 0.7170162773487566,
+        "end_frac": 0.03702232586704518,
+        "lr_peak": 0.004226191556898453,
+        "weight_decay": 0.00011675319046560459
+    }
+}

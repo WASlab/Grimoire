@@ -1,5 +1,6 @@
 import torch.nn as nn
 import torch.nn.functional as F
+import torch
 
 class CNN(nn.Module):
     def __init__(self, num_classes=10):
@@ -95,8 +96,12 @@ class EfficientCNN(nn.Module):
             nn.Linear(256, 256),
             nn.BatchNorm1d(256),
             nn.GELU(),
-            nn.Dropout(0.4),
-            nn.Linear(256, num_classes)
+            nn.Dropout(0.2),
+            nn.Linear(256, 128),
+            nn.BatchNorm1d(128),
+            nn.GELU(), 
+            nn.Dropout(0.2),
+            nn.Linear(128, num_classes)
         )
 
     def forward(self, x):
@@ -108,68 +113,14 @@ class EfficientCNN(nn.Module):
         x = self.fc(x)
         return x
     
-class ConvSwiGLU(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size=3, padding=1, groups=1):
-        super().__init__()
-        self.conv_gate = nn.Conv2d(in_channels, out_channels, kernel_size, padding=padding, groups=groups)
-        self.conv_value = nn.Conv2d(in_channels, out_channels, kernel_size, padding=padding, groups=groups)
-        self.bn = nn.BatchNorm2d(out_channels)
-
-    def forward(self, x):
-        gate = F.silu(self.conv_gate(x))
-        value = self.conv_value(x)
-        return self.bn(gate * value)
-
-
-class SwiGLUFC(nn.Module):
-    def __init__(self, in_features, out_features, dropout=0.0):
-        super().__init__()
-        self.linear_gate = nn.Linear(in_features, out_features)
-        self.linear_value = nn.Linear(in_features, out_features)
-        self.bn = nn.BatchNorm1d(out_features)
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, x):
-        gate = F.silu(self.linear_gate(x))
-        value = self.linear_value(x)
-        return self.dropout(self.bn(gate * value))
-
-
-class SwiGLUEfficientCNN(nn.Module):
-    def __init__(self, num_classes=10):
-        super().__init__()
-        self.conv_block1 = nn.Sequential(
-            ConvSwiGLU(1, 32),
-            ConvSwiGLU(32, 32, groups=32),  # Depthwise
-            ConvSwiGLU(32, 64, kernel_size=1, padding=0),  # Pointwise
-            nn.MaxPool2d(2)
-        )
-
-        self.conv_block2 = nn.Sequential(
-            ConvSwiGLU(64, 64),
-            ConvSwiGLU(64, 64, groups=64),  # Depthwise
-            ConvSwiGLU(64, 128, kernel_size=1, padding=0),  # Pointwise
-            nn.MaxPool2d(2)
-        )
-
-        self.conv_block3 = nn.Sequential(
-            ConvSwiGLU(128, 128),
-            ConvSwiGLU(128, 128, groups=128),  # Depthwise
-            ConvSwiGLU(128, 256, kernel_size=1, padding=0)  # Pointwise
-        )
-
-        self.global_pool = nn.AdaptiveAvgPool2d(1)
-
-        self.fc = nn.Sequential(
-            SwiGLUFC(256, 256, dropout=0.4),
-            nn.Linear(256, num_classes)
-        )
-
-    def forward(self, x):
-        x = self.conv_block1(x)
-        x = self.conv_block2(x)
-        x = self.conv_block3(x)
-        x = self.global_pool(x)
-        x = x.view(x.size(0), -1)
-        x = self.fc(x)
-        return x
+if __name__ == '__main__':
+    model = EfficientCNN()
+    
+    # Count total trainable parameters
+    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print("Total trainable parameters:", total_params)
+    model.eval()
+    # Test a forward pass with a dummy input (e.g., a 28x28 grayscale image)
+    dummy_input = torch.randn(1, 1, 28, 28)
+    output = model(dummy_input)
+    print("Output shape:", output.shape)

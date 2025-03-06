@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader, TensorDataset, ConcatDataset
 from torchvision import transforms as T
 from tqdm import tqdm
 from bayes_opt import BayesianOptimization  # pip install bayesian-optimization
-from model import CNN, EfficientCNN, SwiGLUEfficientCNN
+from model import CNN
 plt.style.use('seaborn-v0_8-darkgrid')
 
 # =============== Global Settings & Hyperparameters ===============
@@ -108,10 +108,6 @@ def get_dataloaders(train_tds, val_tds, test_tds, batch_size=BATCH_SIZE, shuffle
     test_loader  = DataLoader(test_tds, batch_size=batch_size, shuffle=False)
     return train_loader, val_loader, test_loader
 
-# ---------------------------
-# CNN Architecture (Proxy model)
-# ---------------------------
-
 
 # ---------------------------
 # Augmentation Pipeline Builder (GPU-accelerated)
@@ -193,7 +189,7 @@ def evaluate_augmentation_policy(policy_params, init_state, train_tds, val_tds, 
     train_loader, val_loader, test_loader = get_dataloaders(augmented_train_tds, val_tds, test_tds, batch_size)
     
     num_classes = int(train_tds.tensors[1].max().item() + 1)
-    model = SwiGLUEfficientCNN(num_classes=num_classes).to(DEVICE)
+    model = CNN(num_classes=num_classes).to(DEVICE)
     model.load_state_dict(init_state)
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.AdamW(model.parameters(), lr=1e-3)
@@ -252,7 +248,7 @@ if __name__ == "__main__":
     train_tds, val_tds, test_tds = load_tensor_datasets(SAVED_TENSORSETS_DIR)
     num_classes = int(train_tds.tensors[1].max().item() + 1)
     torch.manual_seed(42)
-    init_model = SwiGLUEfficientCNN(num_classes=num_classes)
+    init_model = CNN(num_classes=num_classes)
     initial_state = copy.deepcopy(init_model.state_dict())
     
     # Define search space (for grayscale images, skipping color jitter)
@@ -319,7 +315,7 @@ if __name__ == "__main__":
     final_train_loader, _, test_loader = get_dataloaders(final_augmented_train_tds, val_tds, test_tds, batch_size=BATCH_SIZE)
     
     # Initialize final model with same initial state.
-    final_model = SwiGLUEfficientCNN(num_classes=num_classes).to(DEVICE)
+    final_model = CNN(num_classes=num_classes).to(DEVICE)
     final_model.load_state_dict(initial_state)
     criterion = nn.CrossEntropyLoss()
     optimizer_final = optim.AdamW(final_model.parameters(), lr=1e-3)
