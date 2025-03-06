@@ -12,13 +12,9 @@ import torch.nn.functional as F
 import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
-from bayes_opt import BayesianOptimization  # pip install bayesian-optimization
+from bayes_opt import BayesianOptimization
 from sklearn.metrics import f1_score, precision_score, recall_score, accuracy_score
 from model import CNN, EfficientCNN
-
-# You requested to see the cosine warmup + cosine decay schedule implemented.
-# We also removed the need for an explicit warmup step count (num_warmup_epochs)
-# and removed b1/b2 as tunable parameters altogether.
 
 # ---------------------------
 # Global Verbosity (1 = minimal, 2 = maximum)
@@ -31,7 +27,7 @@ def vprint(msg, level=1):
 # ---------------------------
 # Global Objective Metric
 # ---------------------------
-# Acceptable values: "accuracy", "macro_f1", "micro_f1", "weighted_f1", "precision", "recall"
+# Acceptable: "accuracy", "macro_f1", "micro_f1", "weighted_f1", "precision", or "recall"
 OBJECTIVE_METRIC = "accuracy"
 
 # =============== Hyperparameters ===============
@@ -42,10 +38,10 @@ SAVED_TENSORSETS_DIR = "./saved_tensorsets"
 RESULTS_DIR        = "./kmnist/results_bayes_opt"
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
-# FIXED seed for data loading and model initialization.
+# FIXED seed for data loading and model initialization
 DATA_LOADER_SEED   = 42
 
-EARLYSTOP_PATIENCE = float('nan')  # Set to finite value (e.g. 2) to enable early stopping, or NaN to disable
+EARLYSTOP_PATIENCE = float('nan')  # Set to finite (e.g., 2) to enable early stopping, or NaN to disable
 THRESH_ZERO        = 1e-12
 
 MODEL_NAME = "EfficientCNN_v1"  # Global model identifier
@@ -67,7 +63,7 @@ tqdm_kwargs = dict(
 # ---------------------------
 def load_tensor_datasets(save_dir=SAVED_TENSORSETS_DIR):
     vprint(f"[load_tensor_datasets] Loading KMNIST TensorDatasets from '{save_dir}'...", level=2)
-    # Adjust these paths to the actual files for your environment
+    # Adjust these paths to the actual files in your environment
     train_tds = torch.load("./kmnist/results_augmentation_search2/kmnist_train_augmented_tensorset.pth")
     val_tds = torch.load("./kmnist/saved_tensorsets/kmnist_val_tensorset.pth")
     test_tds = torch.load("./kmnist/saved_tensorsets/kmnist_test_tensorset.pth")
@@ -103,53 +99,45 @@ def generate_cosine_warmup_decay_schedule(lr_base, lr_peak, lr_end, total_epochs
     Piecewise schedule that:
       - In the first half of the epochs, does a half-cosine from lr_base to lr_peak (warmup).
       - In the second half, does a half-cosine from lr_peak down to lr_end (decay).
-    This removes the need for an explicit 'num_warmup_epochs' param.
     """
     schedule = []
     for epoch in range(total_epochs):
         p = epoch / max(1, (total_epochs - 1))  # fraction of progress [0..1]
         if p <= 0.5:
             # Warmup: from lr_base up to lr_peak
-            # Map p in [0..0.5] to p2 in [0..1]
             p2 = p / 0.5
-            # Half-cosine from lr_base to lr_peak
             lr = lr_base + 0.5 * (lr_peak - lr_base) * (1 - math.cos(math.pi * p2))
         else:
             # Decay: from lr_peak down to lr_end
-            # Map p in [0.5..1] to p2 in [0..1]
             p2 = (p - 0.5) / 0.5
-            # Half-cosine from lr_peak down to lr_end
             lr = lr_peak + 0.5 * (lr_end - lr_peak) * (1 - math.cos(math.pi * p2))
         schedule.append(lr)
     return schedule
 
 # ---------------------------
-# Evaluation Function (Full Training) with Toggleable Early Stopping
+# Full Training + Early Stopping
 # ---------------------------
 def evaluate_schedule_full(lr_schedule, wd_schedule, init_state_dict, train_loader, val_loader, test_loader,
                            num_epochs=NUM_EPOCHS, device=DEVICE, weight_decay=None,
                            early_stop_patience=EARLYSTOP_PATIENCE):
-    num_classes = int(train_loader.dataset.tensors[1].max().item()+1)
+    num_classes = int(train_loader.dataset.tensors[1].max().item() + 1)
     model = EfficientCNN(num_classes=num_classes).to(device)
     model.load_state_dict(init_state_dict)
     criterion = nn.CrossEntropyLoss()
 
-    # We'll use AdamW with fixed betas
-    # (b1 and b2 are removed from tuning and remain as defaults)
     if weight_decay is None:
         weight_decay = wd_schedule[0]
-    optimizer = optim.AdamW(model.parameters(), lr=lr_schedule[0], weight_decay=weight_decay,betas=(.80, .999))
-
-    scaler = torch.cuda.amp.GradScaler()
+    optimizer = optim.AdamW(model.parameters(), lr=lr_schedule[0],
+                            weight_decay=weight_decay, betas=(0.80, 0.999))
 
     best_val_loss = float('inf')
     best_state = None
     epochs_no_improve = 0
     prev_val_loss = None
 
-    for e in range(1, num_epochs+1):
-        current_lr = lr_schedule[e-1]
-        current_wd = wd_schedule[e-1]
+    for e in range(1, num_epochs + 1):
+        current_lr = lr_schedule[e - 1]
+        current_wd = wd_schedule[e - 1]
         for pg in optimizer.param_groups:
             pg['lr'] = current_lr
             pg['weight_decay'] = current_wd
@@ -158,12 +146,10 @@ def evaluate_schedule_full(lr_schedule, wd_schedule, init_state_dict, train_load
         for images, labels in train_loader:
             images, labels = images.to(device), labels.to(device)
             optimizer.zero_grad()
-            with torch.cuda.amp.autocast():
-                outputs = model(images)
-                loss = criterion(outputs, labels)
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
 
         val_loss = compute_loss(model, val_loader, criterion, device)
         vprint(f"[early_stop] Epoch {e}: validation loss = {val_loss:.4f}", level=2)
@@ -188,6 +174,7 @@ def evaluate_schedule_full(lr_schedule, wd_schedule, init_state_dict, train_load
                 best_val_loss = val_loss
                 best_state = copy.deepcopy(model.state_dict())
 
+    # Load best val state if it exists
     if best_state is not None:
         model.load_state_dict(best_state)
 
@@ -224,21 +211,17 @@ TEST_LOADER = None
 INIT_SD = None
 
 # ---------------------------
-# Objective Function (for pickling)
+# Objective Function
 # ---------------------------
 def objective(lr_peak, base_frac, end_frac, weight_decay):
     """
-    Now uses a piecewise cosine warmup + cosine decay schedule from:
-      lr_base = base_frac * lr_peak
-      lr_end  = end_frac * lr_peak
-    We removed num_warmup_epochs and b1/b2 from the search.
+    Bayesian Optimization calls this to train a model and return accuracy.
     """
     lr_base = base_frac * lr_peak
     lr_end = end_frac * lr_peak
 
-    # Generate the schedule
     lr_schedule = generate_cosine_warmup_decay_schedule(lr_base, lr_peak, lr_end, NUM_EPOCHS)
-    wd_schedule = [weight_decay]*NUM_EPOCHS
+    wd_schedule = [weight_decay] * NUM_EPOCHS
 
     metrics, _ = evaluate_schedule_full(
         lr_schedule=lr_schedule,
@@ -293,7 +276,7 @@ def save_experiment_results(method_name, meta, best_state, init_state_dict):
     else:
         init_path = base_init_path + ".pth"
         best_path = base_best_path + ".pth"
-    
+
     torch.save(init_state_dict, init_path)
     if best_state is not None:
         torch.save(best_state, best_path)
@@ -305,28 +288,7 @@ def save_experiment_results(method_name, meta, best_state, init_state_dict):
     vprint(f"[{method_name.upper()}] Results saved to {json_path}.", level=2)
 
 # ---------------------------
-# Misclassification Report Utility (for final test run)
-# ---------------------------
-def print_misclassification_report(model, test_loader, device=DEVICE):
-    model.eval()
-    misclassified = {}
-    all_preds, all_labels = [], []
-    with torch.no_grad():
-        for images, labels in test_loader:
-            images, labels = images.to(device), labels.to(device)
-            outputs = model(images)
-            preds = outputs.argmax(dim=1)
-            for true, pred in zip(labels.cpu().numpy(), preds.cpu().numpy()):
-                if true != pred:
-                    misclassified[true] = misclassified.get(true, 0) + 1
-            all_preds.extend(preds.cpu().numpy())
-            all_labels.extend(labels.cpu().numpy())
-    vprint("Misclassification Report:", level=1)
-    for cls in sorted(misclassified.keys()):
-        vprint(f"Class {cls}: {misclassified[cls]} misclassifications", level=1)
-
-# ---------------------------
-# Main Pipeline with Bayesian Optimization, Toggleable Early Stopping, and Checkpointing
+# Main Pipeline
 # ---------------------------
 def main():
     vprint(f"[main] Setting up results folder: '{RESULTS_DIR}'", level=1)
@@ -352,11 +314,11 @@ def main():
     init_model = EfficientCNN(num_classes=num_classes)
     INIT_SD = copy.deepcopy(init_model.state_dict())
 
-    # Define the parameter bounds (no num_warmup_epochs, no b1/b2)
+    # Define the parameter bounds
     pbounds = {
         "lr_peak": (1e-3, 1e-2),
         "base_frac": (0.5, 0.9),
-        "end_frac": (0.0, 0.5),
+        "end_frac": (0.0, 0.50),
         "weight_decay": (1e-6, 1e-3)
     }
 
@@ -374,8 +336,8 @@ def main():
     else:
         vprint("[bayes_opt] Resuming from checkpoint.", level=1)
 
-    total_iter = 100  # Number of subsequent BO iterations
-    checkpoint_interval = 10  # checkpoint every 10 iterations
+    total_iter = 40  # Number of subsequent BO iterations
+    checkpoint_interval = 10  # checkpoint every 10
 
     try:
         for i in range(0, total_iter, checkpoint_interval):

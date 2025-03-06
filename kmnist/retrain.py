@@ -4,10 +4,9 @@ import copy
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import torch.nn.functional as F
 import math
 import random
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 from sklearn.metrics import accuracy_score
@@ -15,7 +14,7 @@ from sklearn.metrics import accuracy_score
 from pytorch_grad_cam import GradCAM
 from pytorch_grad_cam.utils.image import show_cam_on_image
 import numpy as np
-from model import CNN
+from model import EfficientCNN
 
 plt.style.use('seaborn-v0_8-darkgrid')
 
@@ -25,25 +24,47 @@ plt.style.use('seaborn-v0_8-darkgrid')
 NUM_EPOCHS = 10
 BATCH_SIZE = 1028
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-DATA_LOADER_SEED = 42  # Fixed seed for reproducibility during retraining
+DATA_LOADER_SEED = 42  # Fixed seed for reproducibility
 SAVED_TENSORSETS_DIR = "./saved_tensorsets"
 RESULTS_DIR = "./kmnist/results_bayes_opt"
-BEST_RESULTS_FILE = os.path.join(RESULTS_DIR, "problem1_bayes_opt_results_CNN_v1.json")
+BEST_RESULTS_FILE = os.path.join(RESULTS_DIR, "problem1_bayes_opt_results_EfficientCNN_v1.json")
 
 # ---------------------------
 # Load best hyperparameters from results file
 # ---------------------------
 with open(BEST_RESULTS_FILE, "r") as f:
     best_results = json.load(f)
+# Expected keys: "lr_peak", "base_frac", "end_frac", "weight_decay" (we ignore b1/b2)
 best_params = best_results["best_params"]
 
-
+# ---------------------------
+# Cosine Warmup + Cosine Decay Schedule
+# ---------------------------
+def generate_cosine_warmup_decay_schedule(lr_base, lr_peak, lr_end, total_epochs):
+    """
+    Generates a schedule that, for the first half of epochs, warms up the learning rate
+    from lr_base to lr_peak with a half-cosine curve, then decays from lr_peak to lr_end
+    over the second half.
+    """
+    schedule = []
+    for epoch in range(total_epochs):
+        p = epoch / max(1, (total_epochs - 1))  # progress in [0,1]
+        if p <= 0.5:
+            # Warmup phase: map [0,0.5] to [0,1]
+            p2 = p / 0.5
+            lr = lr_base + 0.5 * (lr_peak - lr_base) * (1 - math.cos(math.pi * p2))
+        else:
+            # Decay phase: map [0.5,1] to [0,1]
+            p2 = (p - 0.5) / 0.5
+            lr = lr_peak + 0.5 * (lr_end - lr_peak) * (1 - math.cos(math.pi * p2))
+        schedule.append(lr)
+    return schedule
 
 # ---------------------------
-# Data loading functions
+# Data Loading Functions
 # ---------------------------
 def load_tensor_datasets(save_dir=SAVED_TENSORSETS_DIR):
-    train_tds = torch.load("./kmnist/results_augmentation_search/kmnist_train_augmented_tensorset.pth")
+    train_tds = torch.load("./kmnist/results_augmentation_search2/kmnist_train_augmented_tensorset.pth")
     val_tds = torch.load("./kmnist/saved_tensorsets/kmnist_val_tensorset.pth")
     test_tds = torch.load("./kmnist/saved_tensorsets/kmnist_test_tensorset.pth")
     return train_tds, val_tds, test_tds
@@ -56,17 +77,6 @@ def get_dataloaders(train_tds, val_tds, test_tds, batch_size=BATCH_SIZE, shuffle
     test_loader = DataLoader(test_tds, batch_size=batch_size, shuffle=False)
     return train_loader, val_loader, test_loader
 
-def generate_lr_schedule(lr_base, lr_peak, lr_end, num_warmup_epochs, total_epochs):
-    schedule = []
-    for epoch in range(total_epochs):
-        if epoch < num_warmup_epochs:
-            lr = lr_base + (lr_peak - lr_base) * (epoch+1) / num_warmup_epochs
-        else:
-            cosine_decay = 0.5 * (1 + math.cos(math.pi * (epoch - num_warmup_epochs) / (total_epochs - num_warmup_epochs)))
-            lr = lr_end + (lr_peak - lr_end) * cosine_decay
-        schedule.append(lr)
-    return schedule
-
 # ---------------------------
 # Training and Evaluation Function
 # ---------------------------
@@ -74,34 +84,42 @@ def train_and_evaluate(seed, best_params):
     torch.manual_seed(seed)
     random.seed(seed)
     train_tds, val_tds, test_tds = load_tensor_datasets()
-    train_loader, val_loader, test_loader = get_dataloaders(train_tds, val_tds, test_tds, batch_size=BATCH_SIZE, shuffle_seed=seed)
-    
+    train_loader, val_loader, test_loader = get_dataloaders(train_tds, val_tds, test_tds,
+                                                             batch_size=BATCH_SIZE,
+                                                             shuffle_seed=seed)
+    # Set up cosine schedule:
     lr_peak = best_params["lr_peak"]
     lr_base = best_params["base_frac"] * lr_peak
     lr_end = best_params["end_frac"] * lr_peak
-    num_warmup_epochs = max(1, int(round(best_params["num_warmup_epochs"])))
-    lr_schedule = generate_lr_schedule(lr_base, lr_peak, lr_end, num_warmup_epochs, NUM_EPOCHS)
+    lr_schedule = generate_cosine_warmup_decay_schedule(lr_base, lr_peak, lr_end, NUM_EPOCHS)
     wd_schedule = [best_params["weight_decay"]] * NUM_EPOCHS
 
-    model = CNN(num_classes=10).to(DEVICE)
-    # Reset model parameters using default initialization
+    model = EfficientCNN(num_classes=10).to(DEVICE)
+    # Reinitialize model parameters
     model.apply(lambda m: m.reset_parameters() if hasattr(m, 'reset_parameters') else None)
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.AdamW(model.parameters(), lr=lr_schedule[0], weight_decay=best_params["weight_decay"],
-                            betas=(best_params["b1"], best_params["b2"]))
-    scaler = torch.cuda.amp.GradScaler()
+    # Use fixed betas (0.8, 0.999) as per retraining regimen
+    optimizer = optim.AdamW(model.parameters(), lr=lr_schedule[0],
+                            weight_decay=best_params["weight_decay"],
+                            betas=(0.8, 0.999))
 
     for epoch in range(1, NUM_EPOCHS+1):
+        # Update learning rate and weight decay based on schedule
+        current_lr = lr_schedule[epoch-1]
+        current_wd = wd_schedule[epoch-1]
+        for pg in optimizer.param_groups:
+            pg['lr'] = current_lr
+            pg['weight_decay'] = current_wd
+
         model.train()
-        for images, labels in train_loader:
+        for images, labels in tqdm(train_loader, desc=f"Epoch {epoch}/{NUM_EPOCHS}", leave=False):
             images, labels = images.to(DEVICE), labels.to(DEVICE)
             optimizer.zero_grad()
-            with torch.cuda.amp.autocast():
-                outputs = model(images)
-                loss = criterion(outputs, labels)
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+
     model.eval()
     tot_correct, tot_samples = 0, 0
     with torch.no_grad():
@@ -125,10 +143,11 @@ def process_img(img):
     return img_np
 
 # ---------------------------
-# Interactive Visualization: Grad-CAM
+# Interactive Grad-CAM Visualization
 # ---------------------------
 def interactive_visualize(model, test_loader, device=DEVICE, num_samples_per_class=2):
-    target_layer = model.conv2  # Use conv2 as target layer
+    # Here we pick a target layer from the model for Grad-CAM; adjust as desired.
+    target_layer = model.conv_block2[0]
     cam = GradCAM(model=model, target_layers=[target_layer])
     
     def collect_samples():
@@ -150,18 +169,15 @@ def interactive_visualize(model, test_loader, device=DEVICE, num_samples_per_cla
                     else:
                         if true not in misclassified or len(misclassified[true]) < num_samples_per_class:
                             misclassified.setdefault(true, []).append((img.cpu(), pred))
-                # Once we've gathered enough, break out
                 if len(misclassified) >= 10 and len(correct) >= 10:
                     break
         return misclassified, correct
 
     def visualize_samples(samples, title_prefix):
-        # For each class, plot all samples (each in a subplot)
         fig, axes = plt.subplots(1, len(samples), figsize=(4*len(samples), 4))
         if len(samples) == 1:
             axes = [axes]
         for ax, cls in zip(axes, sorted(samples.keys())):
-            # Take the first sample for this class
             sample = samples[cls][0]
             if isinstance(sample, tuple):
                 img, pred = sample
@@ -183,7 +199,7 @@ def interactive_visualize(model, test_loader, device=DEVICE, num_samples_per_cla
 
     while True:
         misclassified, correct = collect_samples()
-        v = input("Press 1 to view misclassified samples, 2 to view correctly classified samples, 3 to exit visualization: ").strip()
+        v = input("Press 1 for misclassified, 2 for correctly classified, 3 to exit visualization: ").strip()
         if v == "1":
             visualize_samples(misclassified, "Misclassified")
         elif v == "2":
@@ -192,14 +208,13 @@ def interactive_visualize(model, test_loader, device=DEVICE, num_samples_per_cla
             break
 
 # ---------------------------
-# Main: Retrain and Visualize
+# Main: Retrain and Optionally Visualize
 # ---------------------------
 if __name__ == "__main__":
-    # Choose whether to run a single training run for visualization only.
-    VISUALIZE_ONLY = False
+    VISUALIZE_ONLY = False  # Set to True to retrain a single run for visualization
 
     if VISUALIZE_ONLY:
-        seed = 42  # Fixed seed
+        seed = 42
         acc, model, test_loader = train_and_evaluate(seed, best_params)
         print(f"Test Accuracy = {acc:.4f}")
         interactive_visualize(model, test_loader, device=DEVICE, num_samples_per_class=1)
@@ -213,8 +228,8 @@ if __name__ == "__main__":
             print(f"Run {run+1}: Test Accuracy = {acc:.4f}")
             accuracies.append(acc)
             models.append(model)
-        avg_acc = sum(accuracies)/len(accuracies)
-        var_acc = sum((x - avg_acc) ** 2 for x in accuracies)/len(accuracies)
+        avg_acc = sum(accuracies) / len(accuracies)
+        var_acc = sum((x - avg_acc) ** 2 for x in accuracies) / len(accuracies)
         print(f"\nAverage Test Accuracy over {num_runs} runs: {avg_acc:.4f}")
         print(f"Variance over {num_runs} runs: {var_acc:.6f}")
         

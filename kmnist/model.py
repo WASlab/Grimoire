@@ -93,16 +93,17 @@ class EfficientCNN(nn.Module):
         self.global_pool = nn.AdaptiveAvgPool2d(1)
 
         self.fc = nn.Sequential(
-            nn.Linear(256, 256),
+            nn.Linear(256, 512),  # Expand to learn richer interactions
+            nn.BatchNorm1d(512),
+            nn.GELU(),
+            nn.Dropout(0.3),      # Regularize the expanded space
+            nn.Linear(512, 256),  # Compress to focus on critical features
             nn.BatchNorm1d(256),
             nn.GELU(),
             nn.Dropout(0.2),
-            nn.Linear(256, 128),
-            nn.BatchNorm1d(128),
-            nn.GELU(), 
-            nn.Dropout(0.2),
-            nn.Linear(128, num_classes)
+            nn.Linear(256, 10)    # Final classification
         )
+
 
     def forward(self, x):
         x = self.conv_block1(x)
