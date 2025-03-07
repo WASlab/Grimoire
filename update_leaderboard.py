@@ -13,15 +13,16 @@ It records the following fields in a Markdown table in 'Leaderboard.md':
     - Average Accuracy
 
 Update conditions:
-    1. If the model is not present in the leaderboard, a new record is added.
-    2. If the model is present and the provided best accuracy is better than the current entry, the record is updated.
+    1. If the model/dataset pair is not present in the leaderboard, a new record is added.
+    2. If the record exists and the provided best accuracy is better than the current entry,
+       the record is updated.
     
-Additionally, when run without full command-line arguments, the script enters a manual mode where it 
-prompts the user for input and—if a record exists—asks whether to overwrite it.
+In manual mode (i.e., when run without full command-line arguments), the user is prompted for input,
+and if a record exists, the user is asked whether to overwrite it.
 
 Note:
-    Markdown is used for the leaderboard file because it renders well on GitHub. If you prefer a different 
-    file format (e.g., CSV, JSON), the read/write functions can be adjusted accordingly.
+    Markdown is used for the leaderboard file because it renders well on GitHub.
+    If you prefer a different file format (e.g., CSV, JSON), the read/write functions can be adjusted accordingly.
 """
 
 import os
@@ -60,23 +61,28 @@ def read_leaderboard():
 def write_leaderboard(entries):
     """
     Writes the leaderboard entries into the Markdown file in a professional table format.
+    The entries are sorted first by Dataset (alphabetically) and then by Best Accuracy (descending).
     """
+    # Sort entries: group by dataset (alphabetical) and then sort by best accuracy descending
+    sorted_entries = sorted(entries, key=lambda e: (e["Dataset"].lower(), -float(e["Best Accuracy"])))
+    
     with open(LEADERBOARD_FILENAME, "w") as f:
         header_line = "| " + " | ".join(HEADERS) + " |"
         separator_line = "| " + " | ".join(["---"] * len(HEADERS)) + " |"
         f.write(header_line + "\n")
         f.write(separator_line + "\n")
-        for entry in entries:
+        for entry in sorted_entries:
             row = "| " + " | ".join(str(entry.get(header, "")) for header in HEADERS) + " |"
             f.write(row + "\n")
 
 def update_leaderboard_record(dataset, model, num_params, epochs, batch_size, best_accuracy, avg_accuracy, manual=False):
     """
-    Updates the leaderboard according to the following conditions:
-      - Adds a new record if the model does not exist.
-      - Updates the record if the model exists and the new best_accuracy is better.
+    Updates the leaderboard based on these conditions:
+      - If the dataset-model pair is not present, add a new record.
+      - If the dataset-model pair exists and the new best_accuracy is better, update the record.
     
-    In manual mode, if the model exists but the new best_accuracy is not better, the user is prompted to decide.
+    In manual mode, if the record exists but the new best_accuracy is not better,
+    the user is prompted to decide whether to overwrite.
     
     Parameters:
         dataset (str): Name of the dataset.
@@ -92,14 +98,14 @@ def update_leaderboard_record(dataset, model, num_params, epochs, batch_size, be
     updated = False
     found_index = None
 
-    # Search for an existing entry by model name
+    # Search for an existing entry by both dataset and model name.
     for i, entry in enumerate(entries):
-        if entry["Model"] == model:
+        if entry["Dataset"] == dataset and entry["Model"] == model:
             found_index = i
             break
 
     if found_index is None:
-        # Model not found; add a new record.
+        # Record not found; add a new record.
         new_entry = {
             "Dataset": dataset,
             "Model": model,
@@ -110,10 +116,10 @@ def update_leaderboard_record(dataset, model, num_params, epochs, batch_size, be
             "Average Accuracy": str(avg_accuracy)
         }
         entries.append(new_entry)
-        print(f"Added new model '{model}' to the leaderboard.")
+        print(f"Added new record for model '{model}' on dataset '{dataset}' to the leaderboard.")
         updated = True
     else:
-        # Model exists; check if the new best_accuracy is higher.
+        # Record exists; check if the new best_accuracy is higher.
         try:
             current_best = float(entries[found_index]["Best Accuracy"])
         except ValueError:
@@ -128,12 +134,11 @@ def update_leaderboard_record(dataset, model, num_params, epochs, batch_size, be
                 "Best Accuracy": str(best_accuracy),
                 "Average Accuracy": str(avg_accuracy)
             }
-            print(f"Updated model '{model}' on the leaderboard with an improved best accuracy.")
+            print(f"Updated record for model '{model}' on dataset '{dataset}' with an improved best accuracy.")
             updated = True
         else:
             if manual:
-                # Manual mode: display current entry and ask whether to overwrite
-                print("Current leaderboard entry for the model:")
+                print("Current leaderboard entry for the record:")
                 for header in HEADERS:
                     print(f"{header}: {entries[found_index].get(header, '')}")
                 ans = input("Do you want to overwrite the previous entry? (YES/NO): ")
@@ -147,12 +152,12 @@ def update_leaderboard_record(dataset, model, num_params, epochs, batch_size, be
                         "Best Accuracy": str(best_accuracy),
                         "Average Accuracy": str(avg_accuracy)
                     }
-                    print(f"Manually updated model '{model}' on the leaderboard.")
+                    print(f"Manually updated record for model '{model}' on dataset '{dataset}'.")
                     updated = True
                 else:
                     print("No update made to the leaderboard.")
             else:
-                print(f"Model '{model}' was not updated because the current best accuracy ({current_best}) is higher or equal.")
+                print(f"Record for model '{model}' on dataset '{dataset}' was not updated because the current best accuracy ({current_best}) is higher or equal.")
     
     if updated:
         write_leaderboard(entries)

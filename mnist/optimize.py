@@ -35,7 +35,7 @@ NUM_EPOCHS         = 10
 BATCH_SIZE         = 1028
 DEVICE             = "cuda" if torch.cuda.is_available() else "cpu"
 SAVED_TENSORSETS_DIR = "./saved_tensorsets"
-RESULTS_DIR        = "./kmnist/results_bayes_opt"
+RESULTS_DIR        = "./MNIST/results_bayes_opt"
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
 # FIXED seed for data loading and model initialization
@@ -62,11 +62,11 @@ tqdm_kwargs = dict(
 # Data Loading Functions
 # ---------------------------
 def load_tensor_datasets(save_dir=SAVED_TENSORSETS_DIR):
-    vprint(f"[load_tensor_datasets] Loading KMNIST TensorDatasets from '{save_dir}'...", level=2)
+    vprint(f"[load_tensor_datasets] Loading MNIST TensorDatasets from '{save_dir}'...", level=2)
     # Adjust these paths to the actual files in your environment
-    train_tds = torch.load("./kmnist/results_augmentation_search2/kmnist_train_augmented_tensorset.pth")
-    val_tds = torch.load("./kmnist/saved_tensorsets/kmnist_val_tensorset.pth")
-    test_tds = torch.load("./kmnist/saved_tensorsets/kmnist_test_tensorset.pth")
+    train_tds = torch.load("./MNIST/results_augmentation_search/MNIST_train_augmented_tensorset.pth")
+    val_tds = torch.load("./MNIST/saved_tensorsets/MNIST_val_tensorset.pth")
+    test_tds = torch.load("./MNIST/saved_tensorsets/MNIST_test_tensorset.pth")
     vprint(f"[load_tensor_datasets] Done. (Train={len(train_tds)}, Val={len(val_tds)}, Test={len(test_tds)})", level=2)
     return train_tds, val_tds, test_tds
 
