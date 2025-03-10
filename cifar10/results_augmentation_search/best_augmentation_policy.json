@@ -1,0 +1,20 @@
+{
+    "color_jitter_prob": 0.7054318156799111,
+    "color_jitter_strength": 0.2890041478641088,
+    "cutout_fill": 0.0476769916345348,
+    "cutout_prob": 0.0,
+    "cutout_size": 0.13713254681809303,
+    "flip_prob": 0.636844174014654,
+    "mixup_alpha": 0.7041804806494476,
+    "mixup_prob": 0.3399535579783829,
+    "noise_prob": 0.28347839569751615,
+    "noise_std": 0.007889378078994314,
+    "num_augmented_copies": 12,
+    "perspective_distortion": 0.34605657287653324,
+    "perspective_prob": 0.5125692290138052,
+    "rotate_deg": 7.543735092969897,
+    "rotate_prob": 0.3468917319733064,
+    "scale_prob": 0.0,
+    "translate_frac": 0.10731405718286643,
+    "translate_prob": 0.8362270370568428
+}
