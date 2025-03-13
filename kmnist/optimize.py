@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 from bayes_opt import BayesianOptimization
 from sklearn.metrics import f1_score, precision_score, recall_score, accuracy_score
-from model import CNN, EfficientCNN
+from model import CNN, EfficientCNNwAttn
 
 # ---------------------------
 # Global Verbosity (1 = minimal, 2 = maximum)
@@ -44,7 +44,7 @@ DATA_LOADER_SEED   = 42
 EARLYSTOP_PATIENCE = float('nan')  # Set to finite (e.g., 2) to enable early stopping, or NaN to disable
 THRESH_ZERO        = 1e-12
 
-MODEL_NAME = "EfficientCNN_v1"  # Global model identifier
+MODEL_NAME = "EfficientCNNwAttn_v1"  # Global model identifier
 
 CHECKPOINT_META_PATH = os.path.join(RESULTS_DIR, f"bayes_opt_checkpoint_meta_{MODEL_NAME}.json")
 CHECKPOINT_OPTIMIZER_PATH = os.path.join(RESULTS_DIR, f"bayes_opt_checkpoint_optimizer_{MODEL_NAME}.pkl")
@@ -121,7 +121,7 @@ def evaluate_schedule_full(lr_schedule, wd_schedule, init_state_dict, train_load
                            num_epochs=NUM_EPOCHS, device=DEVICE, weight_decay=None,
                            early_stop_patience=EARLYSTOP_PATIENCE):
     num_classes = int(train_loader.dataset.tensors[1].max().item() + 1)
-    model = EfficientCNN(num_classes=num_classes).to(device)
+    model = EfficientCNNwAttn(num_classes=num_classes).to(device)
     model.load_state_dict(init_state_dict)
     criterion = nn.CrossEntropyLoss()
 
@@ -303,7 +303,7 @@ def main():
 
     checkpoint_meta = {"model_name": MODEL_NAME, "completed": "NULL", "best_params": None}
 
-    vprint("[main] Loading dataset + building initial EfficientCNN model.", level=1)
+    vprint("[main] Loading dataset + building initial EfficientCNNwAttn model.", level=1)
     train_tds, val_tds, test_tds = load_tensor_datasets(SAVED_TENSORSETS_DIR)
     TRAIN_LOADER, VAL_LOADER, TEST_LOADER = get_dataloaders(train_tds, val_tds, test_tds, BATCH_SIZE)
     num_classes = int(TRAIN_LOADER.dataset.tensors[1].max().item() + 1)
@@ -311,7 +311,7 @@ def main():
     # Fix model initialization seed
     torch.manual_seed(42)
     random.seed(42)
-    init_model = EfficientCNN(num_classes=num_classes)
+    init_model = EfficientCNNwAttn(num_classes=num_classes)
     INIT_SD = copy.deepcopy(init_model.state_dict())
 
     # Define the parameter bounds

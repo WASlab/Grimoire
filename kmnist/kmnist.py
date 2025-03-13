@@ -1,4 +1,3 @@
-# create_tensordatasets.py
 import torch
 from torch.utils.data import Subset, TensorDataset
 from torchvision import datasets, transforms
@@ -33,15 +32,38 @@ def create_tensorsets_kmnist(
 ):
     """
     1. Download KMNIST.
-    2. Split training set into train+val with class balance.
-    3. Convert train, val, and test subsets into TensorDatasets.
-    4. Save them to disk so we can later create DataLoaders with flexible batch sizes.
+    2. Compute the mean and standard deviation on the training set.
+    3. Split training set into train+val with class balance.
+    4. Convert train, val, and test subsets into TensorDatasets.
+    5. Save them to disk so we can later create DataLoaders with flexible batch sizes.
     """
+    
+    # --- 1. Define a basic transform for computing statistics (only ToTensor)
+    basic_transform = transforms.Compose([transforms.ToTensor()])
 
-    # --- 1. Define transforms ---
-    transform = transforms.Compose([transforms.ToTensor()])
+    # --- 2. Load the full KMNIST training set with the basic transform
+    kmnist_full = datasets.KMNIST(
+        root=data_dir,
+        train=True,
+        download=True,
+        transform=basic_transform
+    )
 
-    # --- 2. Load entire KMNIST training set & test set ---
+    # --- 3. Compute the mean and standard deviation on the training set
+    # Each image in KMNIST is (1, 28, 28). We stack them and compute channel-wise stats.
+    all_images = torch.stack([img for img, _ in kmnist_full])  # Shape: (N, 1, 28, 28)
+    mean = all_images.mean(dim=[0, 2, 3])
+    std = all_images.std(dim=[0, 2, 3])
+    print(f"Computed mean: {mean}")
+    print(f"Computed std:  {std}")
+
+    # --- 4. Define a new transform with normalization
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize(mean.tolist(), std.tolist())
+    ])
+
+    # --- 5. Reload the KMNIST training and test sets with the new transform
     kmnist_full = datasets.KMNIST(
         root=data_dir,
         train=True,
@@ -58,7 +80,7 @@ def create_tensorsets_kmnist(
     print(f"Full training set size: {len(kmnist_full)}")
     print(f"Test set size:          {len(kmnist_test)}")
 
-    # --- 3. Create class-balanced train/val split ---
+    # --- 6. Create a class-balanced train/validation split
     labels = [kmnist_full[i][1] for i in range(len(kmnist_full))]
     train_indices, val_indices = train_test_split(
         range(len(kmnist_full)),
@@ -73,14 +95,12 @@ def create_tensorsets_kmnist(
     print(f"Train subset size:      {len(kmnist_train)}")
     print(f"Validation subset size: {len(kmnist_val)}")
 
-    # --- 4. Convert train/val/test splits into TensorDataset ---
-    train_tds = to_tensor_dataset(kmnist_train)  # => TensorDataset of shape (N_train, 1, 28, 28)
-    val_tds   = to_tensor_dataset(kmnist_val)    # => TensorDataset of shape (N_val,   1, 28, 28)
-
-    # We also convert the official test set
+    # --- 7. Convert train, validation, and test splits into TensorDatasets
+    train_tds = to_tensor_dataset(kmnist_train)  # TensorDataset of shape (N_train, 1, 28, 28)
+    val_tds   = to_tensor_dataset(kmnist_val)    # TensorDataset of shape (N_val,   1, 28, 28)
     test_tds  = to_tensor_dataset(kmnist_test)
 
-    # --- 5. Save the TensorDatasets ---
+    # --- 8. Save the TensorDatasets to disk
     os.makedirs(save_dir, exist_ok=True)
     torch.save(train_tds, f"{save_dir}/kmnist_train_tensorset.pth")
     torch.save(val_tds,   f"{save_dir}/kmnist_val_tensorset.pth")
