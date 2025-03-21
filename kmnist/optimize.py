@@ -34,7 +34,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 from bayes_opt import BayesianOptimization
 from sklearn.metrics import f1_score, precision_score, recall_score, accuracy_score
-
+from torch_extensions.optim.Muon import Muon
 # ================================
 #  GLOBAL CONFIG / SETTINGS
 # ================================
@@ -60,7 +60,7 @@ os.makedirs(RESULTS_DIR, exist_ok=True)
 
 DATA_LOADER_SEED = 42
 EARLYSTOP_PATIENCE = float('nan')  # set to a finite number (e.g. 2) to enable early stopping
-MODEL_NAME = "EfficientCNNwAttn_v1"
+MODEL_NAME = "EfficientCNN_v1"
 CHECKPOINT_META_PATH = os.path.join(RESULTS_DIR, f"bayes_opt_checkpoint_meta_{MODEL_NAME}.json")
 CHECKPOINT_OPTIMIZER_PATH = os.path.join(RESULTS_DIR, f"bayes_opt_checkpoint_optimizer_{MODEL_NAME}.pkl")
 
@@ -255,45 +255,86 @@ def train_model_step_lr(
     objective_metric=OBJECTIVE_METRIC,
     objective_on="val",
     early_stop_patience=float('nan'),
-    scheduler_params=None
+    scheduler_params=None,
+    optimizer_name="Muon",
+    optimizer_params=None
 ):
     """
     Trains a model using a step-wise LR scheduler & returns (val_metrics, test_metrics, best_state).
-    This is used both in the objective function & final multi-seed evaluation.
+
+    This function allows you to choose from different optimizers (Muon, AdamW, SGD)
+    and to pass optimizer-specific hyperparameters. In particular:
+      - For Muon, parameters with 2 dimensions (e.g. weight matrices) are optimized by Muon,
+        and all others by AdamW.
+      - For AdamW, if 'wd' is provided, it is converted to 'weight_decay'.
+      - For SGD, standard SGD parameters are used.
+    
+    Args:
+        model: The PyTorch model to train.
+        train_loader, val_loader, test_loader: DataLoader objects.
+        device: Device to run on.
+        num_epochs: Number of training epochs.
+        objective_metric: Metric to monitor (e.g. "accuracy", "macro_f1", etc.).
+        objective_on: "val" (default) or "test" for evaluation.
+        early_stop_patience: If not NaN, stops training after this many epochs with no improvement.
+        scheduler_params: Dictionary for scheduler parameters (used to build a StepLRScheduler).
+        optimizer_name: Which optimizer to use: "Muon", "AdamW", or "SGD".
+        optimizer_params: Dictionary with optimizer-specific hyperparameters.
+            For Muon, expected keys include "lr", "wd", "momentum", "nesterov", "ns_steps", "adamw_betas", "adamw_eps".
+            For AdamW, use "lr", "weight_decay", "betas", "eps".
+            For SGD, use "lr", "momentum", "weight_decay", "nesterov".
+    Returns:
+        Tuple of (val_metrics, test_metrics, best_state)
     """
     criterion = nn.CrossEntropyLoss()
-    # Build optimizer with some default LR (will be overridden by the scheduler)
-    # If user wants weight_decay or betas, they can pass them, but we'll keep it simple here:
-    optimizer = optim.AdamW(model.parameters(), lr=1e-3, betas=(0.9, 0.999))
 
-    # Build StepLRScheduler from scheduler_params
+    if optimizer_params is None:
+        optimizer_params = {}
+
+    # Select and initialize the optimizer
+    optimizer = None
+    if optimizer_name.lower() == "muon":
+        # Separate parameters: use Muon for 2D weights and AdamW for the rest.
+        muon_params = [p for p in model.parameters() if p.ndim == 2]
+        adamw_params = [p for p in model.parameters() if p.ndim != 2]
+        optimizer = Muon(
+            muon_params=muon_params,
+            adamw_params=adamw_params,
+            **optimizer_params
+        )
+
+    elif optimizer_name.lower() == "adamw":
+        # If the user provided "wd" (common in Muon settings) then rename it to "weight_decay"
+        if "wd" in optimizer_params and "weight_decay" not in optimizer_params:
+            optimizer_params["weight_decay"] = optimizer_params.pop("wd")
+        optimizer = optim.AdamW(model.parameters(), **optimizer_params)
+
+    elif optimizer_name.lower() == "sgd":
+        optimizer = optim.SGD(model.parameters(), **optimizer_params)
+
+    else:
+        raise ValueError(f"Unsupported optimizer_name: {optimizer_name}")
+
+    # Build a step-wise LR scheduler if parameters are provided.
     scheduler = None
     if scheduler_params is not None:
-        total_steps = scheduler_params.get("total_steps", num_epochs*len(train_loader))
-        warmup_steps = scheduler_params.get("warmup_steps", 0)
-        init_lr = scheduler_params.get("init_lr", 1e-4)
-        peak_lr = scheduler_params.get("peak_lr", 1e-3)
-        end_lr = scheduler_params.get("end_lr", 1e-5)
-        warmup_type = scheduler_params.get("warmup_type", "cosine")
-        decay_type = scheduler_params.get("decay_type", "cosine")
-
         scheduler = StepLRScheduler(
             optimizer=optimizer,
-            total_steps=total_steps,
-            warmup_steps=warmup_steps,
-            init_lr=init_lr,
-            peak_lr=peak_lr,
-            end_lr=end_lr,
-            warmup_type=warmup_type,
-            decay_type=decay_type
+            total_steps=scheduler_params.get("total_steps", num_epochs * len(train_loader)),
+            warmup_steps=scheduler_params.get("warmup_steps", 0),
+            init_lr=scheduler_params.get("init_lr", 1e-4),
+            peak_lr=scheduler_params.get("peak_lr", 1e-3),
+            end_lr=scheduler_params.get("end_lr", 1e-5),
+            warmup_type=scheduler_params.get("warmup_type", "cosine"),
+            decay_type=scheduler_params.get("decay_type", "cosine")
         )
 
     best_score = -float('inf')
     best_state = None
     epochs_no_improve = 0
-    measure_loader = val_loader if objective_on=="val" else test_loader
+    measure_loader = val_loader if objective_on == "val" else test_loader
 
-    for epoch in range(1, num_epochs+1):
+    for epoch in range(1, num_epochs + 1):
         model.train()
         for images, labels in train_loader:
             images, labels = images.to(device), labels.to(device)
@@ -306,12 +347,10 @@ def train_model_step_lr(
             if scheduler is not None:
                 scheduler.step()
 
-        # Evaluate each epoch
         metrics_dict = compute_metrics(model, measure_loader, device)
         current_score = metrics_dict.get(objective_metric, 0.0)
         vprint(f"Epoch {epoch}/{num_epochs} - {objective_on} {objective_metric} = {current_score:.4f}", level=2)
 
-        # Early stopping
         if not math.isnan(early_stop_patience):
             if current_score > best_score + 1e-9:
                 best_score = current_score
@@ -321,20 +360,21 @@ def train_model_step_lr(
                 epochs_no_improve += 1
 
             if epochs_no_improve >= early_stop_patience:
-                vprint(f"[train_model_step_lr] Early stopping at epoch={epoch}. Best {objective_metric}={best_score:.4f}", level=2)
+                vprint(f"[train_model_step_lr] Early stopping at epoch {epoch}. Best {objective_metric} = {best_score:.4f}", level=2)
                 break
         else:
             if current_score > best_score:
                 best_score = current_score
                 best_state = copy.deepcopy(model.state_dict())
 
-    # Load best state
     if best_state is not None:
         model.load_state_dict(best_state)
 
     val_metrics = compute_metrics(model, val_loader, device) if val_loader is not None else {}
     test_metrics = compute_metrics(model, test_loader, device) if test_loader is not None else {}
     return val_metrics, test_metrics, best_state
+
+
 
 
 ########################################
@@ -416,13 +456,13 @@ def objective_function(peak_lr, init_lr_frac, end_lr_frac, warmup_steps_frac, we
 
     # Build the model
     # If you have custom model, import it here
-    from model import EfficientCNNwAttn
+    from model import EfficientCNN
     torch.manual_seed(42)
     random.seed(42)
 
     # Prepare model
     num_classes = int(train_tds.tensors[1].max().item() + 1)
-    model = EfficientCNNwAttn(num_classes=num_classes).to(DEVICE)
+    model = EfficientCNN(num_classes=num_classes).to(DEVICE)
     # Reset model's parameters if it has .reset_parameters
     model.apply(lambda m: m.reset_parameters() if hasattr(m, 'reset_parameters') else None)
 
@@ -550,7 +590,7 @@ def final_multiseed_eval(best_params, num_runs=5):
 
     accuracies = []
     # Example model used below
-    from model import EfficientCNNwAttn
+    from model import EfficientCNN
     for run_idx in range(num_runs):
         seed = 42+run_idx
         torch.manual_seed(seed)
@@ -558,7 +598,7 @@ def final_multiseed_eval(best_params, num_runs=5):
 
         # Build new model
         num_classes = int(train_tds.tensors[1].max().item() + 1)
-        model = EfficientCNNwAttn(num_classes=num_classes).to(DEVICE)
+        model = EfficientCNN(num_classes=num_classes).to(DEVICE)
         # Reset parameters
         model.apply(lambda m: m.reset_parameters() if hasattr(m,'reset_parameters') else None)
 
