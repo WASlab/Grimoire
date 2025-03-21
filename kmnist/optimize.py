@@ -51,7 +51,7 @@ VALID_METRICS = {"accuracy", "precision", "recall", "macro_f1", "micro_f1", "wei
 # Default objective metric & usage
 OBJECTIVE_METRIC = "accuracy"  # e.g. "accuracy", "macro_f1", etc.
 OBJECTIVE_ON = "val"           # "val" or "test" for objective scoring
-NUM_EPOCHS = 6               # proxy training epochs for BO
+NUM_EPOCHS = 10               # proxy training epochs for BO
 BATCH_SIZE = 1028
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -61,7 +61,7 @@ os.makedirs(RESULTS_DIR, exist_ok=True)
 
 DATA_LOADER_SEED = 42
 EARLYSTOP_PATIENCE = float('nan')  # set to a finite number (e.g. 2) to enable early stopping
-MODEL_NAME = "EfficientCNNwAttn_v1"
+MODEL_NAME = "EfficientCNN_v1"
 CHECKPOINT_META_PATH = os.path.join(RESULTS_DIR, f"bayes_opt_checkpoint_meta_{MODEL_NAME}.json")
 CHECKPOINT_OPTIMIZER_PATH = os.path.join(RESULTS_DIR, f"bayes_opt_checkpoint_optimizer_{MODEL_NAME}.pkl")
 
@@ -312,8 +312,8 @@ def train_model_step_lr(
     optimizer = None
     if optimizer_name.lower() == "muon":
         # Separate parameters: use Muon for 2D weights and AdamW for the rest.
-        muon_params = [p for p in model.parameters() if p.ndim == 2]
-        adamw_params = [p for p in model.parameters() if p.ndim != 2]
+        muon_params = [p for p in model.parameters() if p.ndim >= 2]
+        adamw_params = [p for p in model.parameters() if p.ndim < 2]
         optimizer = Muon(
             muon_params=muon_params,
             adamw_params=adamw_params,
@@ -469,11 +469,11 @@ def objective_function(peak_lr, init_lr_frac, end_lr_frac, warmup_steps_frac, we
     }
 
     # Build the model
-    from model import EfficientCNNwAttn
+    from model import EfficientCNN
     torch.manual_seed(42)
     random.seed(42)
     num_classes = int(train_tds.tensors[1].max().item() + 1)
-    model = EfficientCNNwAttn(num_classes=num_classes).to(DEVICE)
+    model = EfficientCNN(num_classes=num_classes).to(DEVICE)
     model.apply(lambda m: m.reset_parameters() if hasattr(m, 'reset_parameters') else None)
 
     muon_optimizer_params = {
@@ -518,11 +518,11 @@ def run_bayes_opt():
        - weight_decay
     """
     pbounds = {
-        "peak_lr": (1e-3, 1e-2),
+        "peak_lr": (1e-3, 5e-2),
         "init_lr_frac": (0.1, 0.9),
         "end_lr_frac": (0.0, 0.5),
         "warmup_steps_frac": (0.0, 0.5),
-        "weight_decay": (1e-7, 1e-5)
+        "weight_decay": (5e-6, 5e-6)
     }
 
     meta, optimizer_bo = load_checkpoint(CHECKPOINT_META_PATH, CHECKPOINT_OPTIMIZER_PATH, expected_model_name=MODEL_NAME)
@@ -604,14 +604,14 @@ def final_multiseed_eval(best_params, num_runs=5):
     }
 
     accuracies = []
-    from model import EfficientCNNwAttn
+    from model import EfficientCNN
     for run_idx in range(num_runs):
         seed = 42 + run_idx
         torch.manual_seed(seed)
         random.seed(seed)
 
         num_classes = int(train_tds.tensors[1].max().item() + 1)
-        model = EfficientCNNwAttn(num_classes=num_classes).to(DEVICE)
+        model = EfficientCNN(num_classes=num_classes).to(DEVICE)
         model.apply(lambda m: m.reset_parameters() if hasattr(m, 'reset_parameters') else None)
 
         _, test_metrics, _ = train_model_step_lr(
@@ -672,7 +672,7 @@ def example_usage():
     Example calls to train_model_step_lr with different optimizer_params.
     These examples illustrate how one might specify optimizer-specific hyperparameters.
     """
-    from model import EfficientCNNwAttn
+    from model import EfficientCNN
     # Assume train_loader, val_loader, test_loader are already defined
     # For demonstration, we create dummy DataLoaders:
     dummy_data = torch.randn(100, 3, 32, 32)
@@ -699,7 +699,7 @@ def example_usage():
         "warmup_type": "cosine",
         "decay_type": "cosine"
     }
-    model = EfficientCNNwAttn(num_classes=10).to(DEVICE)
+    model = EfficientCNN(num_classes=10).to(DEVICE)
     val_metrics, test_metrics, _ = train_model_step_lr(
         model=model,
         train_loader=train_loader,
@@ -719,7 +719,7 @@ def example_usage():
         "betas": (0.9, 0.999),
         "eps": 1e-6
     }
-    model = EfficientCNNwAttn(num_classes=10).to(DEVICE)
+    model = EfficientCNN(num_classes=10).to(DEVICE)
     val_metrics, test_metrics, _ = train_model_step_lr(
         model=model,
         train_loader=train_loader,
