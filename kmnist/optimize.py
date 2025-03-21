@@ -35,6 +35,7 @@ from tqdm import tqdm
 from bayes_opt import BayesianOptimization
 from sklearn.metrics import f1_score, precision_score, recall_score, accuracy_score
 from torch_extensions.optim.Muon import Muon
+
 # ================================
 #  GLOBAL CONFIG / SETTINGS
 # ================================
@@ -48,9 +49,9 @@ def vprint(msg, level=1):
 VALID_METRICS = {"accuracy", "precision", "recall", "macro_f1", "micro_f1", "weighted_f1"}
 
 # Default objective metric & usage
-OBJECTIVE_METRIC = "accuracy"  # e.g. "accuracy", "macro_f1", ...
+OBJECTIVE_METRIC = "accuracy"  # e.g. "accuracy", "macro_f1", etc.
 OBJECTIVE_ON = "val"           # "val" or "test" for objective scoring
-NUM_EPOCHS = 10                # proxy training epochs for BO
+NUM_EPOCHS = 6               # proxy training epochs for BO
 BATCH_SIZE = 1028
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -60,7 +61,7 @@ os.makedirs(RESULTS_DIR, exist_ok=True)
 
 DATA_LOADER_SEED = 42
 EARLYSTOP_PATIENCE = float('nan')  # set to a finite number (e.g. 2) to enable early stopping
-MODEL_NAME = "EfficientCNN_v1"
+MODEL_NAME = "EfficientCNNwAttn_v1"
 CHECKPOINT_META_PATH = os.path.join(RESULTS_DIR, f"bayes_opt_checkpoint_meta_{MODEL_NAME}.json")
 CHECKPOINT_OPTIMIZER_PATH = os.path.join(RESULTS_DIR, f"bayes_opt_checkpoint_optimizer_{MODEL_NAME}.pkl")
 
@@ -144,15 +145,14 @@ class StepLRScheduler:
         elif self.warmup_type == "polynomial":
             return self.init_lr + (self.peak_lr - self.init_lr) * (progress ** 2)
         elif self.warmup_type == "cosine":
-            # f(0)=0, f(1)=1 => 1-cos(pi/2*progress)
             return self.init_lr + (self.peak_lr - self.init_lr) * (1 - math.cos((math.pi * progress) / 2))
         elif self.warmup_type == "sigmoid":
             k = 12.0
-            raw0 = 1/(1+math.exp(k*0.5))
-            raw1 = 1/(1+math.exp(-k*0.5))
-            raw = 1/(1+math.exp(-k*(progress-0.5)))
-            norm = (raw - raw0)/(raw1 - raw0)
-            return self.init_lr + (self.peak_lr - self.init_lr)*norm
+            raw0 = 1 / (1 + math.exp(k * 0.5))
+            raw1 = 1 / (1 + math.exp(-k * 0.5))
+            raw = 1 / (1 + math.exp(-k * (progress - 0.5)))
+            norm = (raw - raw0) / (raw1 - raw0)
+            return self.init_lr + (self.peak_lr - self.init_lr) * norm
         elif self.warmup_type == "static":
             return self.init_lr
         else:
@@ -161,40 +161,37 @@ class StepLRScheduler:
     def _decay_lr(self):
         decay_step = self.current_step - self.warmup_steps
         decay_total = max(1, self.total_steps - self.warmup_steps)
-        progress = decay_step/decay_total
-
+        progress = decay_step / decay_total
         if self.decay_type == "linear":
-            return self.peak_lr + (self.end_lr - self.peak_lr)*progress
+            return self.peak_lr + (self.end_lr - self.peak_lr) * progress
         elif self.decay_type == "exponential":
             ratio = self.end_lr / max(1e-12, self.peak_lr)
-            return self.peak_lr*(ratio ** progress)
+            return self.peak_lr * (ratio ** progress)
         elif self.decay_type == "polynomial":
-            return self.peak_lr + (self.end_lr - self.peak_lr)*(progress ** 2)
+            return self.peak_lr + (self.end_lr - self.peak_lr) * (progress ** 2)
         elif self.decay_type == "cosine":
-            return self.end_lr + 0.5*(self.peak_lr - self.end_lr)*(1 + math.cos(math.pi*progress))
+            return self.end_lr + 0.5 * (self.peak_lr - self.end_lr) * (1 + math.cos(math.pi * progress))
         elif self.decay_type == "static":
             return self.peak_lr
         elif self.decay_type == "sigmoid":
             k = 12.0
-            raw0 = 1/(1+math.exp(-k*0.5))
-            raw1 = 1/(1+math.exp(k*0.5))
-            raw = 1/(1+math.exp(k*(progress-0.5)))
-            norm = (raw - raw0)/(raw1 - raw0)
-            return self.peak_lr + (self.end_lr - self.peak_lr)*norm
+            raw0 = 1 / (1 + math.exp(-k * 0.5))
+            raw1 = 1 / (1 + math.exp(k * 0.5))
+            raw = 1 / (1 + math.exp(k * (progress - 0.5)))
+            norm = (raw - raw0) / (raw1 - raw0)
+            return self.peak_lr + (self.end_lr - self.peak_lr) * norm
         elif self.decay_type == "logarithmic":
-            # normalized so f(0)=1 => peak_lr, f(1)=0 => end_lr
-            factor = 1 - math.log(1+progress*(math.e-1))
-            return self.peak_lr*factor + self.end_lr*(1 - factor)
+            factor = 1 - math.log(1 + progress * (math.e - 1))
+            return self.peak_lr * factor + self.end_lr * (1 - factor)
         else:
             raise ValueError(f"Unknown decay_type {self.decay_type}")
 
     def _set_lr(self, lr):
-        for pg in self.optimizer.param_groups:
-            pg["lr"] = lr
+        for param_group in self.optimizer.param_groups:
+            param_group["lr"] = lr
 
     def get_lr(self):
         return self.optimizer.param_groups[0]["lr"]
-
 
 ########################################
 #  DATASET LOADING
@@ -215,7 +212,6 @@ def get_dataloaders(train_tds, val_tds, test_tds, batch_size=BATCH_SIZE, shuffle
     val_loader   = DataLoader(val_tds, batch_size=batch_size, shuffle=False)
     test_loader  = DataLoader(test_tds, batch_size=batch_size, shuffle=False)
     return train_loader, val_loader, test_loader
-
 
 ########################################
 #  METRIC COMPUTATION
@@ -241,6 +237,27 @@ def compute_metrics(model, loader, device):
     }
     return metrics
 
+########################################
+#  HELPER: Build Scheduler Parameters
+########################################
+def build_scheduler_params_from_best(best_params, train_loader):
+    """
+    Given the best_params from BO and a training loader, this helper computes the scheduler
+    parameters in a consistent way.
+    """
+    total_steps = NUM_EPOCHS * len(train_loader)
+    warmup_steps = int(best_params["warmup_steps_frac"] * total_steps)
+    scheduler_params = {
+        "scheduler_type": "step",
+        "total_steps": total_steps,
+        "warmup_steps": warmup_steps,
+        "init_lr": best_params["init_lr_frac"] * best_params["peak_lr"],
+        "peak_lr": best_params["peak_lr"],
+        "end_lr": best_params["end_lr_frac"] * best_params["peak_lr"],
+        "warmup_type": "cosine",
+        "decay_type": "cosine"
+    }
+    return scheduler_params
 
 ########################################
 #  TRAINING LOOP (with Step Scheduler)
@@ -304,7 +321,7 @@ def train_model_step_lr(
         )
 
     elif optimizer_name.lower() == "adamw":
-        # If the user provided "wd" (common in Muon settings) then rename it to "weight_decay"
+        # Remap 'wd' to 'weight_decay' if necessary.
         if "wd" in optimizer_params and "weight_decay" not in optimizer_params:
             optimizer_params["weight_decay"] = optimizer_params.pop("wd")
         optimizer = optim.AdamW(model.parameters(), **optimizer_params)
@@ -374,9 +391,6 @@ def train_model_step_lr(
     test_metrics = compute_metrics(model, test_loader, device) if test_loader is not None else {}
     return val_metrics, test_metrics, best_state
 
-
-
-
 ########################################
 #  CHECKPOINTING UTILITIES
 ########################################
@@ -442,7 +456,7 @@ def objective_function(peak_lr, init_lr_frac, end_lr_frac, warmup_steps_frac, we
     total_steps = NUM_EPOCHS * len(train_loader)
     warmup_steps = int(warmup_steps_frac * total_steps)
 
-    # Build scheduler params
+    # Build scheduler params based on the current hyperparameters
     scheduler_params = {
         "scheduler_type": "step",
         "total_steps": total_steps,
@@ -455,20 +469,23 @@ def objective_function(peak_lr, init_lr_frac, end_lr_frac, warmup_steps_frac, we
     }
 
     # Build the model
-    # If you have custom model, import it here
-    from model import EfficientCNN
+    from model import EfficientCNNwAttn
     torch.manual_seed(42)
     random.seed(42)
-
-    # Prepare model
     num_classes = int(train_tds.tensors[1].max().item() + 1)
-    model = EfficientCNN(num_classes=num_classes).to(DEVICE)
-    # Reset model's parameters if it has .reset_parameters
+    model = EfficientCNNwAttn(num_classes=num_classes).to(DEVICE)
     model.apply(lambda m: m.reset_parameters() if hasattr(m, 'reset_parameters') else None)
 
-    # We'll incorporate weight_decay by adjusting the param groups in training. For simplicity, we do so by
-    # not using it directly in the optimizer constructor. Another approach is to pass it in the final step.
-    # For the objective, let's do a short training with the step LR.
+    muon_optimizer_params = {
+        "lr": peak_lr,
+        "wd": weight_decay,
+        "momentum": 0.95,
+        "nesterov": True,
+        "ns_steps": 5,
+        "adamw_betas": (0.9, 0.999),
+        "adamw_eps": 1e-6
+    }
+
     val_metrics, test_metrics, _ = train_model_step_lr(
         model=model,
         train_loader=train_loader,
@@ -479,7 +496,9 @@ def objective_function(peak_lr, init_lr_frac, end_lr_frac, warmup_steps_frac, we
         objective_metric=OBJECTIVE_METRIC,
         objective_on="val",
         early_stop_patience=2,
-        scheduler_params=scheduler_params
+        scheduler_params=scheduler_params,
+        optimizer_name="Muon",
+        optimizer_params=muon_optimizer_params
     )
 
     score = val_metrics.get(OBJECTIVE_METRIC, 0.0)
@@ -503,7 +522,7 @@ def run_bayes_opt():
         "init_lr_frac": (0.1, 0.9),
         "end_lr_frac": (0.0, 0.5),
         "warmup_steps_frac": (0.0, 0.5),
-        "weight_decay": (1e-5, 1e-5)
+        "weight_decay": (1e-7, 1e-5)
     }
 
     meta, optimizer_bo = load_checkpoint(CHECKPOINT_META_PATH, CHECKPOINT_OPTIMIZER_PATH, expected_model_name=MODEL_NAME)
@@ -515,7 +534,6 @@ def run_bayes_opt():
             random_state=42,
         )
         meta = {"model_name": MODEL_NAME, "completed": "NULL", "best_params": None}
-        # Optional: we can do init_points first
         optimizer_bo.maximize(init_points=5, n_iter=0)
     else:
         vprint("[bayes_opt] Resuming from existing checkpoint...", level=1)
@@ -528,13 +546,9 @@ def run_bayes_opt():
             steps_this_block = min(checkpoint_interval, total_iter - i)
             vprint(f"[bayes_opt] Running {steps_this_block} iterations of BO (Block {i+1}/{total_iter})", level=1)
             optimizer_bo.maximize(n_iter=steps_this_block)
-
-            # Update meta
             meta["best_params"] = optimizer_bo.max.get("params", None)
             meta["completed"] = "NULL"
-            # Save checkpoint
             save_checkpoint(optimizer_bo, meta, CHECKPOINT_META_PATH, CHECKPOINT_OPTIMIZER_PATH)
-
     except Exception as e:
         vprint(f"[bayes_opt] Optimization interrupted: {e}", level=1)
         meta["best_params"] = optimizer_bo.max.get("params", None)
@@ -542,18 +556,14 @@ def run_bayes_opt():
         save_checkpoint(optimizer_bo, meta, CHECKPOINT_META_PATH, CHECKPOINT_OPTIMIZER_PATH)
         raise e
 
-    # final
     meta["completed"] = "FULL"
     meta["best_params"] = optimizer_bo.max["params"]
     meta["best_score"] = optimizer_bo.max["target"]
     vprint(f"[bayes_opt] Best parameters found: {meta['best_params']} => {meta['best_score']:.4f}", level=1)
-
-    # remove checkpoint files if you want a "clean" result
     if os.path.exists(CHECKPOINT_META_PATH):
         os.remove(CHECKPOINT_META_PATH)
     if os.path.exists(CHECKPOINT_OPTIMIZER_PATH):
         os.remove(CHECKPOINT_OPTIMIZER_PATH)
-
     return meta
 
 ########################################
@@ -562,23 +572,28 @@ def run_bayes_opt():
 def final_multiseed_eval(best_params, num_runs=5):
     """
     Retrain model with best_params over multiple seeds (e.g. 5) and return the average test accuracy.
+    Uses a helper function to build scheduler parameters from best_params and the training loader,
+    ensuring consistency with the BO configuration.
     """
     # Derive the actual LR values
     peak_lr = best_params["peak_lr"]
     init_lr = best_params["init_lr_frac"] * peak_lr
     end_lr = best_params["end_lr_frac"] * peak_lr
-    # We'll do the same dataset as we used in BO:
+
+    # Load dataset (same as used during BO)
     train_path = r"kmnist\results_augmentation_search2\kmnist_train_augmented_tensorset.pth"
     val_path   = r"kmnist\saved_tensorsets\kmnist_val_tensorset.pth"
     test_path  = r"kmnist\saved_tensorsets\kmnist_test_tensorset.pth"
     train_tds, val_tds, test_tds = load_tensor_datasets(train_path, val_path, test_path)
     train_loader, val_loader, test_loader = get_dataloaders(train_tds, val_tds, test_tds, BATCH_SIZE)
 
+    # Use the same logic as in objective_function to compute total_steps and warmup_steps
     total_steps = NUM_EPOCHS * len(train_loader)
-    warmup_steps = int(best_params["warmup_steps_frac"]*total_steps)
+    # Ensure that warmup_steps_frac is stored in best_params (from BO)
+    warmup_steps = int(best_params["warmup_steps_frac"] * total_steps)
 
     scheduler_params = {
-        "scheduler_type":"step",
+        "scheduler_type": "step",
         "total_steps": total_steps,
         "warmup_steps": warmup_steps,
         "init_lr": init_lr,
@@ -589,20 +604,16 @@ def final_multiseed_eval(best_params, num_runs=5):
     }
 
     accuracies = []
-    # Example model used below
-    from model import EfficientCNN
+    from model import EfficientCNNwAttn
     for run_idx in range(num_runs):
-        seed = 42+run_idx
+        seed = 42 + run_idx
         torch.manual_seed(seed)
         random.seed(seed)
 
-        # Build new model
         num_classes = int(train_tds.tensors[1].max().item() + 1)
-        model = EfficientCNN(num_classes=num_classes).to(DEVICE)
-        # Reset parameters
-        model.apply(lambda m: m.reset_parameters() if hasattr(m,'reset_parameters') else None)
+        model = EfficientCNNwAttn(num_classes=num_classes).to(DEVICE)
+        model.apply(lambda m: m.reset_parameters() if hasattr(m, 'reset_parameters') else None)
 
-        # Train
         _, test_metrics, _ = train_model_step_lr(
             model=model,
             train_loader=train_loader,
@@ -613,14 +624,17 @@ def final_multiseed_eval(best_params, num_runs=5):
             objective_metric=OBJECTIVE_METRIC,
             objective_on="val",
             early_stop_patience=2,
-            scheduler_params=scheduler_params
+            scheduler_params=scheduler_params,
+            optimizer_name="Muon"
+            
+            # Here you might also pass optimizer_params if you want to override defaults.
         )
         test_acc = test_metrics["accuracy"]
         vprint(f"[final_multiseed_eval] Run {run_idx+1}/{num_runs}, seed={seed}, Test Acc={test_acc:.4f}", level=1)
         accuracies.append(test_acc)
 
-    avg_acc = sum(accuracies)/len(accuracies)
-    var_acc = sum((x-avg_acc)**2 for x in accuracies)/len(accuracies)
+    avg_acc = sum(accuracies) / len(accuracies)
+    var_acc = sum((x - avg_acc) ** 2 for x in accuracies) / len(accuracies)
     best_acc = max(accuracies)
     return {
         "individual_accuracies": accuracies,
@@ -634,28 +648,112 @@ def final_multiseed_eval(best_params, num_runs=5):
 ########################################
 def main():
     vprint("[main] Starting modular pipeline with Step-based LR + Bayesian Optimization", level=1)
-    # 1) Run Bayesian Optimization or resume from checkpoint
     meta = run_bayes_opt()
-
     best_params = meta["best_params"]
     best_score = meta["best_score"]
     vprint(f"[main] Found best hyperparams = {best_params}, BO val score={best_score:.4f}", level=1)
 
-    # 2) Multi-seed final evaluation
     multi_seed_results = final_multiseed_eval(best_params, num_runs=5)
     vprint(f"[main] Multi-seed final results: {multi_seed_results}", level=1)
 
-    # 3) Build final meta dict with multi-seed info
     meta["multi_seed_results"] = multi_seed_results
     meta["final_average_accuracy"] = multi_seed_results["average_accuracy"]
     meta["final_best_accuracy"] = multi_seed_results["best_accuracy"]
     meta["completed"] = "FULL_MULTI_SEED"
 
-    # 4) Save final results to JSON
     save_experiment_results(meta, final_results_path=FINAL_RESULTS_JSON)
-
     vprint(f"[main] All done. Final average Test Acc: {multi_seed_results['average_accuracy']:.4f}", level=1)
 
+########################################
+#  EXAMPLE USAGE OF train_model_step_lr
+########################################
+def example_usage():
+    """
+    Example calls to train_model_step_lr with different optimizer_params.
+    These examples illustrate how one might specify optimizer-specific hyperparameters.
+    """
+    from model import EfficientCNNwAttn
+    # Assume train_loader, val_loader, test_loader are already defined
+    # For demonstration, we create dummy DataLoaders:
+    dummy_data = torch.randn(100, 3, 32, 32)
+    dummy_labels = torch.randint(0, 10, (100,))
+    dummy_dataset = TensorDataset(dummy_data, dummy_labels)
+    train_loader, val_loader, test_loader = get_dataloaders(dummy_dataset, dummy_dataset, dummy_dataset, batch_size=32)
+
+    # Example 1: Using Muon optimizer with custom parameters
+    muon_params = {
+        "lr": 2e-3,            # tuned learning rate for Muon
+        "wd": 1e-4,            # weight decay (will be used as 'wd' for Muon)
+        "momentum": 0.95,
+        "nesterov": True,
+        "ns_steps": 6,
+        "adamw_betas": (0.9, 0.999),
+        "adamw_eps": 1e-6
+    }
+    scheduler_params = {
+        "total_steps": 10 * len(train_loader),
+        "warmup_steps": int(0.2 * 10 * len(train_loader)),
+        "init_lr": 0.5 * 2e-3,
+        "peak_lr": 2e-3,
+        "end_lr": 0.1 * 2e-3,
+        "warmup_type": "cosine",
+        "decay_type": "cosine"
+    }
+    model = EfficientCNNwAttn(num_classes=10).to(DEVICE)
+    val_metrics, test_metrics, _ = train_model_step_lr(
+        model=model,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        test_loader=test_loader,
+        num_epochs=10,
+        scheduler_params=scheduler_params,
+        optimizer_name="Muon",
+        optimizer_params=muon_params
+    )
+    vprint(f"[example_usage] Muon optimizer results: Val metrics: {val_metrics}, Test metrics: {test_metrics}")
+
+    # Example 2: Using AdamW optimizer with custom parameters
+    adamw_params = {
+        "lr": 1e-3,
+        "weight_decay": 1e-4,
+        "betas": (0.9, 0.999),
+        "eps": 1e-6
+    }
+    model = EfficientCNNwAttn(num_classes=10).to(DEVICE)
+    val_metrics, test_metrics, _ = train_model_step_lr(
+        model=model,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        test_loader=test_loader,
+        num_epochs=10,
+        scheduler_params=scheduler_params,
+        optimizer_name="AdamW",
+        optimizer_params=adamw_params
+    )
+    vprint(f"[example_usage] AdamW optimizer results: Val metrics: {val_metrics}, Test metrics: {test_metrics}")
+
+########################################
+#  MAIN CLI / CALLABLE PIPELINE
+########################################
+def main_cli():
+    vprint("[main] Starting modular pipeline with Step-based LR + Bayesian Optimization", level=1)
+    meta = run_bayes_opt()
+    best_params = meta["best_params"]
+    best_score = meta["best_score"]
+    vprint(f"[main] Found best hyperparams = {best_params}, BO val score={best_score:.4f}", level=1)
+
+    multi_seed_results = final_multiseed_eval(best_params, num_runs=5)
+    vprint(f"[main] Multi-seed final results: {multi_seed_results}", level=1)
+
+    meta["multi_seed_results"] = multi_seed_results
+    meta["final_average_accuracy"] = multi_seed_results["average_accuracy"]
+    meta["final_best_accuracy"] = multi_seed_results["best_accuracy"]
+    meta["completed"] = "FULL_MULTI_SEED"
+
+    save_experiment_results(meta, final_results_path=FINAL_RESULTS_JSON)
+    vprint(f"[main] All done. Final average Test Acc: {multi_seed_results['average_accuracy']:.4f}", level=1)
 
 if __name__ == "__main__":
-    main()
+    # Uncomment the following line to see example usage of train_model_step_lr:
+    # example_usage()
+    main_cli()
