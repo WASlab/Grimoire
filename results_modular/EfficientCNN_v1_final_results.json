@@ -1,0 +1,26 @@
+{
+    "model_name": "EfficientCNN_v1",
+    "completed": "FULL_MULTI_SEED",
+    "best_params": {
+        "end_lr_frac": 0.06679367840339473,
+        "init_lr_frac": 0.6898082580462159,
+        "peak_lr": 0.015765989050029044,
+        "warmup_steps_frac": 0.0947671346470908,
+        "weight_decay": 5e-06
+    },
+    "best_score": 0.9967,
+    "multi_seed_results": {
+        "individual_accuracies": [
+            0.9859,
+            0.9868,
+            0.9863,
+            0.985,
+            0.9725
+        ],
+        "average_accuracy": 0.9833000000000001,
+        "variance": 2.9507999999999813e-05,
+        "best_accuracy": 0.9868
+    },
+    "final_average_accuracy": 0.9833000000000001,
+    "final_best_accuracy": 0.9868
+}

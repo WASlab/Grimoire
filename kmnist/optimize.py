@@ -312,8 +312,8 @@ def train_model_step_lr(
     optimizer = None
     if optimizer_name.lower() == "muon":
         # Separate parameters: use Muon for 2D weights and AdamW for the rest.
-        muon_params = [p for p in model.parameters() if p.ndim >= 2]
-        adamw_params = [p for p in model.parameters() if p.ndim < 2]
+        muon_params = [p for p in model.parameters() if p.ndim == 2]
+        adamw_params = [p for p in model.parameters() if p.ndim != 2]
         optimizer = Muon(
             muon_params=muon_params,
             adamw_params=adamw_params,
